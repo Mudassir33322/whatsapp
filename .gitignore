@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.next/
+build/
+.env
+.env.local
+*.log
+logs/
+whatsapp-sessions/
+auth-info-*/
+docker/nginx/ssl/
+.DS_Store
+*.tsbuildinfo

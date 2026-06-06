@@ -1,0 +1,405 @@
+
+
+You are a Senior Software Architect, Product Manager, UX Designer, Database Architect, Backend Engineer, Frontend Engineer, DevOps Engineer, WhatsApp Automation Specialist, and Enterprise SaaS Consultant.
+
+Your task is to design and build a production-ready platform called:
+
+SALONLINK PAKISTAN
+
+## PROJECT OVERVIEW
+
+SalonLink Pakistan is a WhatsApp-first and Web-based Grooming Ecosystem that connects customers, salons, barbers, beauty professionals, and salon owners through a centralized platform.
+
+The primary market is Karachi, Pakistan.
+
+The system must be scalable to all cities in Pakistan.
+
+The platform must operate through WhatsApp conversations and a modern web dashboard.
+
+WhatsApp integration must use whatsapp-web.js.
+
+The platform should not depend on expensive third-party services.
+
+Use open-source technologies wherever possible.
+
+---
+
+# CORE BUSINESS GOAL
+
+Allow customers to:
+
+* Discover nearby salons
+* Discover barbers
+* View barber portfolios
+* Compare services and pricing
+* Check real-time queue status
+* Book appointments
+* Track loyalty points
+* Redeem rewards
+* View offers
+* Follow favorite barbers
+* Leave ratings and reviews
+
+Allow salon owners to:
+
+* Manage customers
+* Manage barbers
+* Manage appointments
+* Track revenue
+* Run promotions
+* Track inventory
+* Manage memberships
+* Analyze business performance
+
+---
+
+# USER ROLES
+
+## Customer
+
+Features:
+
+* Registration
+* Login
+* Profile Management
+* Appointment Booking
+* Reviews
+* Loyalty System
+* Membership System
+* Favorite Barbers
+* Favorite Salons
+
+## Barber
+
+Features:
+
+* Profile Management
+* Portfolio Management
+* Schedule Management
+* Earnings Dashboard
+* Customer History
+* Performance Tracking
+
+## Salon Owner
+
+Features:
+
+* Salon Management
+* Barber Management
+* Appointment Management
+* Customer Management
+* Marketing Tools
+* Loyalty Management
+* Revenue Dashboard
+* Inventory Tracking
+
+## Platform Admin
+
+Features:
+
+* User Management
+* Salon Approval
+* Barber Approval
+* Offer Management
+* Membership Management
+* Analytics Dashboard
+* Platform Settings
+
+---
+
+# WHATSAPP FLOW
+
+When user sends:
+
+Hi
+
+Bot should respond:
+
+Welcome to SalonLink Pakistan
+
+1. Pakistan
+
+User selects:
+
+1
+
+Bot asks:
+
+Select City
+
+1. Karachi
+2. Lahore
+3. Islamabad
+
+User selects city.
+
+Bot asks:
+
+Select Area
+
+System loads area list dynamically.
+
+User selects area.
+
+System displays nearby salons.
+
+User selects salon.
+
+System displays:
+
+* Salon Profile
+* Rating
+* Services
+* Offers
+* Barbers
+
+User selects barber.
+
+System displays:
+
+* Barber Profile
+* Experience
+* Ratings
+* Portfolio
+
+User selects service.
+
+System displays available slots.
+
+User selects slot.
+
+System creates appointment.
+
+System sends confirmation.
+
+---
+
+# CUSTOMER MODULE
+
+Create complete functionality for:
+
+* Registration
+* Login
+* Profile
+* Appointment Booking
+* Appointment History
+* Loyalty Points
+* Memberships
+* Reviews
+* Favorite Barbers
+* Favorite Salons
+* Notifications
+* Rebooking
+
+---
+
+# BARBER MODULE
+
+Create complete functionality for:
+
+* Barber Profiles
+* Portfolio Upload
+* Working Hours
+* Appointment Management
+* Customer History
+* Revenue Tracking
+* Ratings
+* Performance Metrics
+
+---
+
+# SALON MODULE
+
+Create complete functionality for:
+
+* Salon Profile
+* Service Management
+* Staff Management
+* Customer Management
+* Appointment Management
+* Revenue Tracking
+* Expense Tracking
+* Inventory Tracking
+* Marketing Campaigns
+
+---
+
+# QUEUE MANAGEMENT SYSTEM
+
+Build real-time queue management.
+
+Example:
+
+Current Waiting: 3
+
+Estimated Wait Time: 20 Minutes
+
+Update automatically.
+
+---
+
+# LOYALTY SYSTEM
+
+Create:
+
+* Points earning
+* Points redemption
+* Reward catalog
+* VIP levels
+
+Levels:
+
+* Bronze
+* Silver
+* Gold
+* Platinum
+
+---
+
+# MEMBERSHIP SYSTEM
+
+Create:
+
+* Monthly plans
+* Quarterly plans
+* Yearly plans
+
+Features:
+
+* Priority booking
+* Discounts
+* Exclusive offers
+
+---
+
+# REVIEW SYSTEM
+
+Customers can:
+
+* Rate barber
+* Rate salon
+* Upload photos
+* Write reviews
+
+Calculate:
+
+* Average rating
+* Total reviews
+* Review trends
+
+---
+
+# INVENTORY MODULE
+
+Track:
+
+* Shampoo
+* Hair Wax
+* Hair Color
+* Cream
+* Beauty Products
+
+Features:
+
+* Stock alerts
+* Low stock notifications
+* Purchase history
+
+---
+
+# ANALYTICS MODULE
+
+Build dashboards for:
+
+* Revenue
+* Bookings
+* Customer Growth
+* Top Barbers
+* Top Salons
+* Popular Services
+
+---
+
+# DATABASE DESIGN
+
+Create complete normalized MySQL schema.
+
+Include:
+
+* Users
+* Salons
+* Barbers
+* Services
+* Appointments
+* Reviews
+* Memberships
+* Loyalty Points
+* Inventory
+* Offers
+* Notifications
+* Transactions
+
+---
+
+# TECHNOLOGY STACK
+
+Frontend:
+
+* Next.js
+* Tailwind CSS
+* ShadCN UI
+
+Backend:
+
+* Node.js
+* Express.js
+
+Database:
+
+* MySQL
+
+ORM:
+
+* Prisma
+
+Authentication:
+
+* JWT
+
+WhatsApp:
+
+* whatsapp-web.js
+
+Caching:
+
+* Redis
+
+Deployment:
+
+* Docker
+* Nginx
+
+Version Control:
+
+* Git
+
+---
+
+# DEVELOPMENT REQUIREMENTS
+
+Generate:
+
+1. Complete system architecture
+2. Folder structure
+3. Database schema
+4. API structure
+5. Authentication system
+6. RBAC permissions
+7. Dashboard designs
+8. WhatsApp flows
+9. Security implementation
+10. Scalability strategy
+11. Deployment architecture
+12. Production-ready code standards
+
+All code, architecture, database design, and workflows must be enterprise-grade, scalable, modular, secure, and suitable for handling thousands of salons and customers across Pakistan.

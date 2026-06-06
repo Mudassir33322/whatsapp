@@ -1,0 +1,6 @@
+{
+  "name": "AutoZap Enterprise",
+  "description": "Advanced WhatsApp Automation Ecosystem with SaaS features, Booking engine, CRM, and Remote QR sync.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["Real-time Messaging", "Automation", "CRM"]
+}
