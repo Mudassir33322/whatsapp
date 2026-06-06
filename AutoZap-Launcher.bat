@@ -91,37 +91,28 @@ echo.
 
 :: ─── CHECK MySQL ──────────────────────────────────────
 echo [*] Checking MySQL connection...
-node scripts/check-mysql.cjs 2> nul
-if errorlevel 1 (
-    echo [!] MySQL check failed (may not be installed).
-    echo [!] The app will still start, but database features won't work.
-    echo [!] Install XAMPP or MySQL and create database 'autozap_platform'.
-    echo.
-    set DB_FAILED=1
-) else (
-    echo [OK] MySQL is running.
-    set DB_FAILED=0
-)
+set DB_FAILED=1
+node scripts/check-mysql.cjs >nul 2>&1
+if %errorlevel% equ 0 set DB_FAILED=0
+if %errorlevel% equ 0 echo [OK] MySQL is running.
+if %errorlevel% neq 0 echo [!] MySQL check failed (may not be installed).
+if %errorlevel% neq 0 echo [!] The app will still start, but database features won't work.
+if %errorlevel% neq 0 echo [!] Install XAMPP or MySQL and create database 'autozap_platform'.
+if %errorlevel% neq 0 echo.
 
 :: ─── CREATE DATABASE ──────────────────────────────────
 if "%DB_FAILED%"=="0" (
     echo [*] Ensuring database exists...
     node scripts/create-database.cjs >nul 2>&1
-    if errorlevel 1 (
-        echo [!] Could not create database. Schema may be missing.
-    ) else (
-        echo [OK] Database 'autozap_platform' ready.
-    )
+    if %errorlevel% equ 0 echo [OK] Database 'autozap_platform' ready.
+    if %errorlevel% neq 0 echo [!] Could not create database. Schema may be missing.
 
     :: ─── RUN SCHEMA ────────────────────────────────────
     echo [*] Running database schema...
     if exist "schema.sql" (
         node scripts/run-schema.cjs >nul 2>&1
-        if errorlevel 1 (
-            echo [!] Schema may have warnings. Server will auto-create missing tables.
-        ) else (
-            echo [OK] Database schema applied.
-        )
+        if %errorlevel% equ 0 echo [OK] Database schema applied.
+        if %errorlevel% neq 0 echo [!] Schema may have warnings. Server will auto-create missing tables.
     )
 )
 
