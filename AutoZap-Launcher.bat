@@ -91,7 +91,7 @@ echo.
 
 :: ─── CHECK MySQL ──────────────────────────────────────
 echo [*] Checking MySQL connection...
-node -e "const mysql=require('mysql2/promise');(async()=>{try{const c=await mysql.createConnection({host:process.env.DB_HOST||'localhost',user:process.env.DB_USER||'root',password:process.env.DB_PASS||''});console.log('MYSQL_OK');await c.end()}catch(e){console.log('MYSQL_FAIL:'+e.message)}})()" 2> nul
+node scripts/check-mysql.cjs 2> nul
 if errorlevel 1 (
     echo [!] MySQL check failed (may not be installed).
     echo [!] The app will still start, but database features won't work.
@@ -106,7 +106,7 @@ if errorlevel 1 (
 :: ─── CREATE DATABASE ──────────────────────────────────
 if "%DB_FAILED%"=="0" (
     echo [*] Ensuring database exists...
-    node -e "const mysql=require('mysql2/promise');(async()=>{try{const c=await mysql.createConnection({host:'localhost',user:'root',password:''});await c.execute('CREATE DATABASE IF NOT EXISTS autozap_platform CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');console.log('DB_OK');await c.end()}catch(e){console.log('DB_FAIL:'+e.message)}})()" >nul 2>&1
+    node scripts/create-database.cjs >nul 2>&1
     if errorlevel 1 (
         echo [!] Could not create database. Schema may be missing.
     ) else (
@@ -116,7 +116,7 @@ if "%DB_FAILED%"=="0" (
     :: ─── RUN SCHEMA ────────────────────────────────────
     echo [*] Running database schema...
     if exist "schema.sql" (
-        node -e "const mysql=require('mysql2/promise'),fs=require('fs');(async()=>{try{const sql=fs.readFileSync('schema.sql','utf8');const c=await mysql.createConnection({host:'localhost',user:'root',password:'',database:'autozap_platform',multipleStatements:true});await c.query(sql);console.log('SCHEMA_OK');await c.end()}catch(e){console.log('SCHEMA_FAIL:'+e.message)}})()" >nul 2>&1
+        node scripts/run-schema.cjs >nul 2>&1
         if errorlevel 1 (
             echo [!] Schema may have warnings. Server will auto-create missing tables.
         ) else (
