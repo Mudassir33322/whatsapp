@@ -1,4 +1,5 @@
 import mysql from 'mysql2/promise';
+import pg from 'pg';
 import Database from 'better-sqlite3';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -25,7 +26,7 @@ function verifyPin(pin: string, stored: string | null | undefined): boolean {
   return pin === stored;
 }
 
-type DbPool = mysql.Pool | InstanceType<typeof Database>;
+type DbPool = mysql.Pool | pg.Pool | InstanceType<typeof Database>;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export let pool: DbPool | any;
 
@@ -274,7 +275,84 @@ try { db.exec('CREATE INDEX IF NOT EXISTS idx_templates_type_active ON templates
       console.log('[SQLite] 2 offers seeded for Prime Cuts');
     }
   }
+} else if (process.env.DB_DIALECT === 'postgres' || (process.env.DB_HOST && process.env.DB_HOST.includes('postgres'))) {
+  // PostgreSQL
+  const { Pool } = pg;
+  const poolSize = parseInt(process.env.DB_POOL_SIZE || '25', 10);
+  const dbPort = parseInt(process.env.DB_PORT || '5432', 10);
+  const dbSsl = process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false;
+  const p = new Pool({
+    host: process.env.DB_HOST || 'localhost',
+    port: dbPort,
+    user: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASS || '',
+    database: process.env.DB_NAME || 'autozap_platform',
+    max: poolSize,
+    ssl: dbSsl,
+  });
+  pool = p;
+  (pool as any).on('error', (err: any) => {
+    console.error('[DB] Pool error:', err.message);
+  });
+  // PostgreSQL migrations
+  (async () => {
+    try {
+      await (pool as pg.Pool).query(`CREATE TABLE IF NOT EXISTS day_offs (id SERIAL PRIMARY KEY, salon_id INTEGER NOT NULL, date DATE NOT NULL, reason VARCHAR(255), is_active BOOLEAN DEFAULT TRUE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (salon_id) REFERENCES salons(id) ON DELETE CASCADE)`);
+      await (pool as pg.Pool).query(`CREATE TABLE IF NOT EXISTS pending_bookings (id SERIAL PRIMARY KEY, salon_id INTEGER NOT NULL, customer_phone VARCHAR(20) NOT NULL, customer_name VARCHAR(100), service_id INTEGER NOT NULL, barber_id INTEGER, appointment_date DATE NOT NULL, appointment_time TIME NOT NULL, status VARCHAR(20) DEFAULT 'pending', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (salon_id) REFERENCES salons(id) ON DELETE CASCADE)`);
+      await (pool as pg.Pool).query(`CREATE TABLE IF NOT EXISTS customer_otps (phone VARCHAR(20) PRIMARY KEY, code VARCHAR(10) NOT NULL, expires_at TIMESTAMP NOT NULL)`);
+      await (pool as pg.Pool).query(`CREATE TABLE IF NOT EXISTS bot_paused (phone VARCHAR(20) PRIMARY KEY, paused BOOLEAN DEFAULT FALSE)`);
+      await (pool as pg.Pool).query(`CREATE TABLE IF NOT EXISTS customer_preferences (phone VARCHAR(20) NOT NULL, pref_key VARCHAR(50) NOT NULL, pref_value TEXT, PRIMARY KEY (phone, pref_key))`);
+      await (pool as pg.Pool).query(`CREATE TABLE IF NOT EXISTS barber_portfolio (id SERIAL PRIMARY KEY, barber_id INTEGER NOT NULL, media_url TEXT NOT NULL, media_type VARCHAR(50), title VARCHAR(255), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (barber_id) REFERENCES barbers(id))`);
+      await (pool as pg.Pool).query(`CREATE TABLE IF NOT EXISTS admin_2fa_tokens (temp_token VARCHAR(100) PRIMARY KEY, admin_id INTEGER NOT NULL, email VARCHAR(100) NOT NULL, expires_at TIMESTAMP NOT NULL)`);
+      await (pool as pg.Pool).query(`ALTER TABLE barber_schedule ADD COLUMN IF NOT EXISTS break_start TIME NULL`).catch(() => {});
+      await (pool as pg.Pool).query(`ALTER TABLE barber_schedule ADD COLUMN IF NOT EXISTS break_end TIME NULL`).catch(() => {});
+      await (pool as pg.Pool).query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS last_status VARCHAR(50) DEFAULT 'New'`).catch(() => {});
+      await (pool as pg.Pool).query(`ALTER TABLE whatsapp_sessions ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'disconnected'`).catch(() => {});
+      await (pool as pg.Pool).query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_appointment_slot ON appointments(barber_id, appointment_date, appointment_time)`).catch(() => {});
+      await (pool as pg.Pool).query(`ALTER TABLE barbers ADD COLUMN IF NOT EXISTS pin_code VARCHAR(10) DEFAULT NULL`).catch(() => {});
+      await (pool as pg.Pool).query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS email VARCHAR(100) DEFAULT NULL`).catch(() => {});
+      await (pool as pg.Pool).query(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS recurring_booking_id INTEGER DEFAULT NULL`).catch(() => {});
+      try {
+        const result = await (pool as pg.Pool).query("SELECT COUNT(*) as cnt FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'public' AND TABLE_NAME = 'error_logs'");
+        if (parseInt(result.rows[0].cnt) === 0) {
+          await (pool as pg.Pool).query(`CREATE TABLE IF NOT EXISTS error_logs (id SERIAL PRIMARY KEY, source VARCHAR(100), message TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
+        }
+      } catch (_) {}
+      // Performance indexes for enterprise scale
+      const pgIndexes = [
+        'CREATE INDEX IF NOT EXISTS idx_barbers_salon_status ON barbers(salon_id, status)',
+        'CREATE INDEX IF NOT EXISTS idx_services_salon_active ON services(salon_id, is_active)',
+        'CREATE INDEX IF NOT EXISTS idx_revenue_salon_date ON revenue(salon_id, date)',
+        'CREATE INDEX IF NOT EXISTS idx_expenses_salon_date ON expenses(salon_id, date)',
+        'CREATE INDEX IF NOT EXISTS idx_staff_salon ON staff(salon_id)',
+        'CREATE INDEX IF NOT EXISTS idx_seats_salon ON seats(salon_id)',
+        'CREATE INDEX IF NOT EXISTS idx_barber_attendance_salon_date ON barber_attendance(salon_id, date)',
+        'CREATE INDEX IF NOT EXISTS idx_barber_attendance_barber_date ON barber_attendance(barber_id, date)',
+        'CREATE INDEX IF NOT EXISTS idx_notification_logs_salon ON notification_logs(salon_id, sent_at)',
+        'CREATE INDEX IF NOT EXISTS idx_payouts_salon_status ON payouts(salon_id, status)',
+        'CREATE INDEX IF NOT EXISTS idx_disputes_salon_status ON disputes(salon_id, status)',
+        'CREATE INDEX IF NOT EXISTS idx_broadcast_salon_status ON broadcast_notifications(salon_id, status)',
+        'CREATE INDEX IF NOT EXISTS idx_salon_media_salon ON salon_media(salon_id, media_type)',
+        'CREATE INDEX IF NOT EXISTS idx_salon_portfolio_salon ON salon_portfolio(salon_id)',
+        'CREATE INDEX IF NOT EXISTS idx_bot_states_updated ON bot_states(updated_at)',
+        'CREATE INDEX IF NOT EXISTS idx_salons_status ON salons(status)',
+        'CREATE INDEX IF NOT EXISTS idx_salons_country_city ON salons(country_id, city_id)',
+        'CREATE INDEX IF NOT EXISTS idx_customers_status ON customers(status)',
+        'CREATE INDEX IF NOT EXISTS idx_audit_logs_admin ON audit_logs(admin_id, created_at)',
+        'CREATE INDEX IF NOT EXISTS idx_salaries_salon ON salaries(salon_id, date)',
+        'CREATE INDEX IF NOT EXISTS idx_recurring_bookings_salon ON recurring_bookings(salon_id, status)',
+        'CREATE INDEX IF NOT EXISTS idx_coupons_code_active ON coupons(code, is_active)',
+        'CREATE INDEX IF NOT EXISTS idx_templates_type_active ON templates(type, is_active)',
+      ];
+      for (const idx of pgIndexes) {
+        await (pool as pg.Pool).query(idx).catch(() => {});
+      }
+    } catch (e) {
+      console.error('[DB PostgreSQL Migration Error]', e);
+    }
+  })();
 } else {
+  // MySQL
   const poolSize = parseInt(process.env.DB_POOL_SIZE || '25', 10);
   const dbPort = parseInt(process.env.DB_PORT || '3306', 10);
   const dbSsl = process.env.DB_SSL === 'true' ? {} : undefined;
@@ -358,15 +436,19 @@ try { db.exec('CREATE INDEX IF NOT EXISTS idx_templates_type_active ON templates
 
 // --- DB Core Functions ---
 
+function isPostgres(): boolean {
+  return process.env.DB_DIALECT === 'postgres' || (process.env.DB_HOST && process.env.DB_HOST.includes('postgres'));
+}
+
 export async function query(sql: string, params: any[] = []): Promise<any> {
   // SQLite path
   if (process.env.USE_SQLITE === 'true') {
-sql = sql.replace(/\bNOW\(\)/gi, "datetime('now')");
-     sql = sql.replace(/\bCURDATE\(\)/gi, "date('now')");
-     sql = sql.replace(/ON DUPLICATE KEY UPDATE/gi, "ON CONFLICT DO UPDATE SET");
-     sql = sql.replace(/VALUES\(([a-zA-Z_][a-zA-Z0-9_]*)\)/gi, "excluded.$1");
-     sql = sql.replace(/\bHOUR\(([a-zA-Z_][a-zA-Z0-9_]*)\)/gi, "CAST(strftime('%H', $1) AS INTEGER)");
-     sql = sql.replace(/\bINSERT IGNORE\b/gi, "INSERT OR IGNORE");
+    sql = sql.replace(/\bNOW\(\)/gi, "datetime('now')");
+    sql = sql.replace(/\bCURDATE\(\)/gi, "date('now')");
+    sql = sql.replace(/ON DUPLICATE KEY UPDATE/gi, "ON CONFLICT DO UPDATE SET");
+    sql = sql.replace(/VALUES\(([a-zA-Z_][a-zA-Z0-9_]*)\)/gi, "excluded.$1");
+    sql = sql.replace(/\bHOUR\(([a-zA-Z_][a-zA-Z0-9_]*)\)/gi, "CAST(strftime('%H', $1) AS INTEGER)");
+    sql = sql.replace(/\bINSERT IGNORE\b/gi, "INSERT OR IGNORE");
     const stmt = (pool as any).prepare(sql);
     if (/^\s*SELECT/i.test(sql)) {
       return stmt.all(params);
@@ -380,7 +462,45 @@ sql = sql.replace(/\bNOW\(\)/gi, "datetime('now')");
       }
     }
   }
-  
+
+  // PostgreSQL path
+  if (isPostgres()) {
+    const maxRetries = 3;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const result = await (pool as pg.Pool).query(sql, params);
+        return result.rows;
+      } catch (err: any) {
+        const isLastAttempt = attempt === maxRetries;
+
+        if (err.code === '42P01') { // undefined_table
+          console.warn(`[DB] Table not found: ${err.message}`);
+          return [];
+        }
+
+        if (err.code === 'ECONNREFUSED' || err.code === '57P01' || err.code === 'ETIMEDOUT' || err.code === '08006' || err.code === '08001') {
+          console.warn(`[DB] Connection error (attempt ${attempt}/${maxRetries}): ${err.code}`);
+          await new Promise(r => setTimeout(r, 1000 * attempt));
+          if (!isLastAttempt) continue;
+        }
+
+        if (err.code === '40001' || err.code === '40P01') { // deadlock
+          console.warn(`[DB] Deadlock detected (attempt ${attempt}/${maxRetries}), retrying...`);
+          await new Promise(r => setTimeout(r, 500 * attempt));
+          if (!isLastAttempt) continue;
+        }
+
+        if (err.code === '23505') { // unique_violation
+          console.warn(`[DB] Duplicate entry: ${err.message}`);
+          throw err;
+        }
+
+        console.error(`[DB Query Error] ${err.code || 'UNKNOWN'}: ${err.message}`);
+        throw err;
+      }
+    }
+  }
+
   // MySQL path
   const maxRetries = 3;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -427,6 +547,8 @@ sql = sql.replace(/\bNOW\(\)/gi, "datetime('now')");
 export async function beginTransaction(): Promise<void> {
   if (process.env.USE_SQLITE === 'true') {
     (pool as any).exec('BEGIN TRANSACTION');
+  } else if (isPostgres()) {
+    await (pool as pg.Pool).query('BEGIN');
   } else {
     await (pool as mysql.Pool).query('START TRANSACTION');
   }
@@ -435,6 +557,8 @@ export async function beginTransaction(): Promise<void> {
 export async function commit(): Promise<void> {
   if (process.env.USE_SQLITE === 'true') {
     (pool as any).exec('COMMIT');
+  } else if (isPostgres()) {
+    await (pool as pg.Pool).query('COMMIT');
   } else {
     await (pool as mysql.Pool).query('COMMIT');
   }
@@ -443,6 +567,8 @@ export async function commit(): Promise<void> {
 export async function rollback(): Promise<void> {
   if (process.env.USE_SQLITE === 'true') {
     (pool as any).exec('ROLLBACK');
+  } else if (isPostgres()) {
+    await (pool as pg.Pool).query('ROLLBACK');
   } else {
     await (pool as mysql.Pool).query('ROLLBACK');
   }
