@@ -11,7 +11,8 @@ if (process.env.NODE_ENV === 'production') {
   process.exit(1);
 }
 
-const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'autozap_dev.sqlite');
+const dataDir = process.env.DATA_DIR || process.cwd();
+const dbPath = process.env.DB_PATH || path.join(dataDir, 'autozap_dev.sqlite');
 console.log(`[Seed] Using database: ${dbPath}`);
 
 const db = new Database(dbPath);

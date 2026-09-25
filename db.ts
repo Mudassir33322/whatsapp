@@ -36,7 +36,8 @@ import { cachedQuery, setCache, clearCache } from './cache';
 export { cachedQuery, setCache, clearCache };
 
 if (process.env.USE_SQLITE === 'true') {
-  const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'autozap_dev.sqlite');
+  const dataDir = process.env.DATA_DIR || process.cwd();
+  const dbPath = process.env.DB_PATH || path.join(dataDir, 'autozap_dev.sqlite');
   const db = new Database(dbPath);
   db.pragma('foreign_keys = ON');
   db.pragma('journal_mode = WAL');

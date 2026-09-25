@@ -295,7 +295,8 @@ app.use(express.json({ limit: '512kb' }));
       return;
     }
 
-    const authPath = path.join(process.cwd(), `auth-info-${sessionId}`);
+    const dataDir = process.env.DATA_DIR || process.cwd();
+    const authPath = path.join(dataDir, `auth-info-${sessionId}`);
     if (!existsSync(authPath)) { mkdirSync(authPath, { recursive: true }); }
 
     const { state, saveCreds } = await useMultiFileAuthState(authPath);
@@ -719,7 +720,8 @@ app.use(express.json({ limit: '512kb' }));
       reconnectAttempts.delete(sid);
       const t = reconnectTimers.get(sid);
       if (t) { clearTimeout(t); reconnectTimers.delete(sid); }
-      const authPath = path.join(process.cwd(), `auth-info-${sid}`);
+      const dataDir = process.env.DATA_DIR || process.cwd();
+      const authPath = path.join(dataDir, `auth-info-${sid}`);
       try { rmSync(authPath, { recursive: true, force: true }); } catch (e) {}
       io.to(`session-${sid}`).emit('session-status', { sessionId: sid, status: 'DISCONNECTED', message: 'Restarting...' });
       connectToWhatsApp(sid).catch(() => {});
@@ -760,7 +762,8 @@ app.use(express.json({ limit: '512kb' }));
       reconnectAttempts.delete(sid);
       const t = reconnectTimers.get(sid);
       if (t) { clearTimeout(t); reconnectTimers.delete(sid); }
-      const authPath = path.join(process.cwd(), `auth-info-${sid}`);
+      const dataDir = process.env.DATA_DIR || process.cwd();
+      const authPath = path.join(dataDir, `auth-info-${sid}`);
       try { rmSync(authPath, { recursive: true, force: true }); } catch (e) {}
       io.to(`session-${sid}`).emit('session-status', { sessionId: sid, status: 'DISCONNECTED', message: 'Session deleted' });
     });

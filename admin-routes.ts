@@ -1176,7 +1176,8 @@ app.post('/api/admin/salons', adminAuth, requireWriteAccess as any, async (req: 
       sessions.delete(sessionId);
       connectingSessions.delete(sessionId);
 
-      const authPath = path.join(process.cwd(), `auth-info-${sessionId}`);
+      const dataDir = process.env.DATA_DIR || process.cwd();
+      const authPath = path.join(dataDir, `auth-info-${sessionId}`);
       const fs = await import('fs');
       if (fs.existsSync(authPath)) {
         fs.rmSync(authPath, { recursive: true, force: true });
@@ -1215,7 +1216,8 @@ app.post('/api/admin/salons', adminAuth, requireWriteAccess as any, async (req: 
       if (cleanupSession) cleanupSession(sessionId);
       sessions.delete(sessionId);
       
-      const authPath = path.join(process.cwd(), `auth-info-${sessionId}`);
+      const dataDir = process.env.DATA_DIR || process.cwd();
+      const authPath = path.join(dataDir, `auth-info-${sessionId}`);
       const fs = await import('fs');
       if (fs.existsSync(authPath)) {
         fs.rmSync(authPath, { recursive: true, force: true });

@@ -1623,7 +1623,8 @@ app.post('/api/salon/whatsapp/restart', salonAuth, async (req: any, res) => {
        if (sessions) sessions.delete(sessionId);
        if (connectingSessions) connectingSessions.delete(sessionId);
 
-       const authPath = path.join(process.cwd(), `auth-info-${sessionId}`);
+       const dataDir = process.env.DATA_DIR || process.cwd();
+        const authPath = path.join(dataDir, `auth-info-${sessionId}`);
        const fs = await import('fs');
        if (fs.existsSync(authPath)) { fs.rmSync(authPath, { recursive: true, force: true }); }
 
@@ -1651,7 +1652,8 @@ app.post('/api/salon/whatsapp/restart', salonAuth, async (req: any, res) => {
        if (sessions) sessions.delete(sessionId);
        if (connectingSessions) connectingSessions.delete(sessionId);
 
-       const authPath = path.join(process.cwd(), `auth-info-${sessionId}`);
+       const dataDir = process.env.DATA_DIR || process.cwd();
+        const authPath = path.join(dataDir, `auth-info-${sessionId}`);
        const fs = await import('fs');
        if (fs.existsSync(authPath)) { fs.rmSync(authPath, { recursive: true, force: true }); }
 
@@ -1673,7 +1675,8 @@ app.post('/api/salon/whatsapp/restart', salonAuth, async (req: any, res) => {
       if (cleanupSession) cleanupSession(sessionId);
       if (sessions) sessions.delete(sessionId);
 
-      const authPath = path.join(process.cwd(), `auth-info-${sessionId}`);
+      const dataDir = process.env.DATA_DIR || process.cwd();
+        const authPath = path.join(dataDir, `auth-info-${sessionId}`);
       const fs = await import('fs');
       if (fs.existsSync(authPath)) { fs.rmSync(authPath, { recursive: true, force: true }); }
 
