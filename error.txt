@@ -1,0 +1,18 @@
+RENCES `staff` (`id`) ON DELETE SET NULL)
+[SLOW] GET /src/salon/SalonReviews.tsx -> 200 (7340ms)
+[SLOW] GET /src/salon/SalonGallery.tsx -> 200 (2000ms)
+[SLOW] POST /api/salon/media/upload -> 200 (1082ms)
+[DB] Duplicate entry: Duplicate entry '5' for key 'salon_id'
+[Salon Route Error] Duplicate entry '5' for key 'salon_id'
+[SLOW] POST /api/salon/media/upload -> 200 (19477ms)
+[SLOW] PUT /api/salon/settings -> 200 (14042ms)
+[SLOW] PUT /api/salon/shop/settings -> 200 (5531ms)
+[SLOW] PUT /api/salon/settings -> 400 (2817ms)
+[SLOW] POST /api/salon/database/reset -> 400 (4739ms)
+[SLOW] POST /api/salon/media/upload -> 200 (63716ms)
+[SLOW] PUT /api/salon/settings -> 400 (3645ms)
+[DB] Unknown table 'customer_otps', creation not implemented
+[Customer Route Error] Table 'justcall.customer_otps' doesn't exist
+7:26:21 PM [vite] (client) page reload error.txt
+7:28:26 PM [vite] (client) page reload error.txt (x2)
+[SLOW] GET /index.html -> 200 (1028ms)

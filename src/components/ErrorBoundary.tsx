@@ -40,13 +40,11 @@ export class ErrorBoundary extends Component<Props, State> {
               <AlertTriangle className="w-8 h-8 text-rose-400" />
             </div>
             <h2 className="text-xl font-bold text-white mb-2">Something went wrong</h2>
-            <p className="text-sm text-slate-400 mb-2">
+            <p className="text-sm text-slate-400 mb-6">
               {this.state.error?.message || 'An unexpected error occurred'}
             </p>
-            <p className="text-xs text-slate-500 mb-6 font-mono">
-              {this.state.error?.stack?.split('\n').slice(0, 3).join('\n')}
-            </p>
             <button
+              type="button"
               onClick={this.handleRetry}
               className="inline-flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-xl hover:bg-indigo-500 font-semibold text-sm transition-all"
             >

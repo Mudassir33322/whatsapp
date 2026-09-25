@@ -1,0 +1,12 @@
+{
+  "name": "AutoZap Enterprise",
+  "scripts": {
+    "build": "npm run build",
+    "start": "node dist/server.js",
+    "install": "npm install"
+  },
+  "env": {
+    "NODE_ENV": "production",
+    "PORT": "3001"
+  }
+}

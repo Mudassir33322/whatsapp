@@ -1,6 +1,9 @@
 import { useState, useEffect, Fragment } from 'react';
-import { UserCircle, Search, Phone, Calendar, ChevronDown, ChevronUp, Loader2, MessageSquare, Send, ArrowLeft } from 'lucide-react';
-import { authHeaders } from './api';
+import { motion, AnimatePresence } from 'motion/react';
+import { UserCircle, Search, Phone, Calendar, ChevronDown, ChevronUp, Loader2, MessageSquare, Send, ArrowLeft, Plus, Pencil, Trash2, X } from 'lucide-react';
+import { salonFetch } from './api';
+import { EmptyState } from '../components/EmptyState';
+import { useConfirm } from '../hooks/useConfirm';
 
 interface Customer {
   phone: string;
@@ -51,6 +54,7 @@ const CUSTOMER_STATUS = {
 const fmtStatus = (s: string) => s.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
 export function SalonCustomers() {
+  const { confirm, confirmDialog } = useConfirm();
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -63,22 +67,26 @@ export function SalonCustomers() {
   const [chatLoading, setChatLoading] = useState(false);
   const [chatText, setChatText] = useState('');
   const [sending, setSending] = useState(false);
+  const [showModal, setShowModal] = useState(false);
+  const [editCustomer, setEditCustomer] = useState<Customer | null>(null);
+  const [form, setForm] = useState({ phone: '', name: '' });
 
-  const fetchCustomers = async (term: string) => {
+  const fetchCustomers = async (term: string, signal?: AbortSignal) => {
     setLoading(true);
     setError('');
     try {
       const params = term ? `?search=${encodeURIComponent(term)}` : '';
-      const r = await fetch(`/api/salon/customers${params}`, { headers: authHeaders() });
+      const r = await salonFetch(`/api/salon/customers${params}`, { signal });
       if (!r.ok) throw new Error('Failed to fetch customers');
       setCustomers(await r.json());
-    } catch (e: any) { setError(e.message); }
+    } catch (e: any) { if (e?.name !== 'AbortError') setError(e.message); }
     finally { setLoading(false); }
   };
 
   useEffect(() => {
-    const timer = setTimeout(() => fetchCustomers(search), 300);
-    return () => clearTimeout(timer);
+    const searchAc = new AbortController();
+    const timer = setTimeout(() => fetchCustomers(search, searchAc.signal), 300);
+    return () => { clearTimeout(timer); searchAc.abort(); };
   }, [search]);
 
   const toggleExpand = async (phone: string) => {
@@ -91,7 +99,7 @@ export function SalonCustomers() {
     setDetailLoading(true);
     setDetail(null);
     try {
-      const r = await fetch(`/api/salon/customers/${phone}`, { headers: authHeaders() });
+      const r = await salonFetch(`/api/salon/customers/${encodeURIComponent(phone)}`);
       if (!r.ok) throw new Error('Failed to load customer details');
       setDetail(await r.json());
     } catch (e: any) { setError(e.message); }
@@ -103,7 +111,7 @@ export function SalonCustomers() {
     setChatLoading(true);
     setChatMessages([]);
     try {
-      const r = await fetch(`/api/salon/chats/${encodeURIComponent(phone)}/messages`, { headers: authHeaders() });
+      const r = await salonFetch(`/api/salon/chats/${encodeURIComponent(phone)}/messages`);
       if (r.ok) setChatMessages(await r.json());
     } catch {} finally { setChatLoading(false); }
   };
@@ -112,9 +120,8 @@ export function SalonCustomers() {
     if (!chatText.trim() || !chatView || sending) return;
     setSending(true);
     try {
-      const r = await fetch(`/api/salon/chats/${encodeURIComponent(chatView.phone)}/send`, {
+      const r = await salonFetch(`/api/salon/chats/${encodeURIComponent(chatView.phone)}/send`, {
         method: 'POST',
-        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: chatText })
       });
       if (r.ok) {
@@ -131,6 +138,43 @@ export function SalonCustomers() {
     } catch {} finally { setSending(false); }
   };
 
+  const createCustomer = async () => {
+    if (!form.phone) return;
+    try {
+      const r = await salonFetch('/api/salon/customers', {
+        method: 'POST',
+        body: JSON.stringify({ phone: form.phone, name: form.name || form.phone }),
+      });
+      if (!r.ok) throw new Error('Failed');
+      setShowModal(false);
+      setForm({ phone: '', name: '' });
+      fetchCustomers(search);
+    } catch (e: any) { setError(e.message); }
+  };
+
+  const updateCustomer = async () => {
+    if (!editCustomer) return;
+    try {
+      const r = await salonFetch(`/api/salon/customers/${encodeURIComponent(editCustomer.phone)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ name: editCustomer.name }),
+      });
+      if (!r.ok) throw new Error('Failed');
+      setEditCustomer(null);
+      fetchCustomers(search);
+    } catch (e: any) { setError(e.message); }
+  };
+
+  const deleteCustomer = async (phone: string) => {
+    const confirmed = await confirm('Delete Customer', 'Are you sure you want to delete this customer? Their chat history and visit data will be permanently removed.', 'Delete', 'danger');
+    if (!confirmed) return;
+    try {
+      const r = await salonFetch(`/api/salon/customers/${encodeURIComponent(phone)}`, { method: 'DELETE' });
+      if (!r.ok) throw new Error('Failed to delete');
+      setCustomers((p) => p.filter((c) => c.phone !== phone));
+    } catch (e: any) { setError(e.message); }
+  };
+
   const fmtDate = (d: string) => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
 
   if (loading && !customers.length) return <div className="flex items-center justify-center min-h-[60vh]"><Loader2 className="w-8 h-8 animate-spin text-indigo-600" /></div>;
@@ -141,7 +185,7 @@ export function SalonCustomers() {
     return (
       <div className="p-6 max-w-4xl mx-auto space-y-4">
         <div className="flex items-center gap-3">
-          <button onClick={() => setChatView(null)} className="p-2 hover:bg-gray-100 rounded-xl transition-colors">
+          <button type="button" onClick={() => setChatView(null)} className="p-2 hover:bg-gray-100 rounded-xl transition-colors">
             <ArrowLeft className="w-5 h-5 text-gray-600" />
           </button>
           <div>
@@ -153,7 +197,7 @@ export function SalonCustomers() {
           {chatLoading ? (
             <div className="flex justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-indigo-600" /></div>
           ) : chatMessages.length === 0 ? (
-            <p className="text-center text-gray-400 py-8 text-sm">No messages yet</p>
+            <EmptyState icon={MessageSquare} title="No messages yet" description="Start a conversation with this customer" />
           ) : (
             chatMessages.map((m, i) => (
               <div key={m.id || i} className={`flex ${m.fromMe ? 'justify-end' : 'justify-start'}`}>
@@ -174,7 +218,7 @@ export function SalonCustomers() {
             placeholder="Type a message..."
             onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
             className="flex-1 px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent" />
-          <button onClick={sendMessage} disabled={!chatText.trim() || sending}
+          <button type="button" onClick={sendMessage} disabled={!chatText.trim() || sending}
             className="px-4 py-2.5 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 disabled:opacity-50 transition-colors">
             {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
           </button>
@@ -183,10 +227,14 @@ export function SalonCustomers() {
     );
   }
 
-  return (
-    <div className="p-6 max-w-7xl mx-auto space-y-6">
+  return (<>
+      {confirmDialog}
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-gray-900">Customers</h1>
+        <button type="button" onClick={() => { setForm({ phone: '', name: '' }); setShowModal(true); }}
+          className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-all text-sm font-semibold">
+          <Plus className="w-4 h-4" /> Add Customer
+        </button>
       </div>
       <div className="relative">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
@@ -207,12 +255,13 @@ export function SalonCustomers() {
                 <th className="px-6 py-3">Loyalty Points</th>
                 <th className="px-6 py-3">Last Visit</th>
                 <th className="px-6 py-3 w-24">Chat</th>
+                <th className="px-6 py-3 w-20">Actions</th>
                 <th className="px-6 py-3 w-10"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {!customers.length ? (
-                <tr><td colSpan={8} className="px-6 py-8 text-center text-gray-400">No customers found</td></tr>
+                <tr><td colSpan={9}><div className="px-6 py-8"><EmptyState icon={UserCircle} title="No customers found" description="Customers will appear here after their first appointment" /></div></td></tr>
               ) : customers.map((c) => (
                 <Fragment key={c.phone}>
                   <tr className="hover:bg-gray-50 transition-colors">
@@ -239,25 +288,37 @@ export function SalonCustomers() {
                     </td>
                     <td className="px-6 py-3.5 text-gray-700 whitespace-nowrap">{fmtDate(c.last_visit)}</td>
                     <td className="px-6 py-3.5">
-                      <button onClick={() => openChat(c.phone, c.name)}
+                      <button type="button" onClick={() => openChat(c.phone, c.name)}
                         className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100 transition-colors text-xs font-medium">
                         <MessageSquare className="w-3.5 h-3.5" /> Chat
                       </button>
                     </td>
                     <td className="px-6 py-3.5">
-                      <button onClick={() => toggleExpand(c.phone)} className="p-1 hover:bg-gray-100 rounded-lg transition-colors">
+                      <div className="flex items-center gap-1">
+                        <button type="button" onClick={() => setEditCustomer(c)}
+                          className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all" title="Edit">
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                        <button type="button" onClick={() => deleteCustomer(c.phone)}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all" title="Delete">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </td>
+                    <td className="px-6 py-3.5">
+                      <button type="button" onClick={() => toggleExpand(c.phone)} className="p-1 hover:bg-gray-100 rounded-lg transition-colors">
                         {expandedPhone === c.phone ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
                       </button>
                     </td>
                   </tr>
                   {expandedPhone === c.phone && (
                     <tr>
-                      <td colSpan={8} className="px-6 py-4 bg-gray-50">
+                      <td colSpan={9} className="px-6 py-4 bg-gray-50">
                         {detailLoading ? (
                           <div className="flex justify-center"><Loader2 className="w-5 h-5 animate-spin text-indigo-600" /></div>
                         ) : detail ? (
                           <div className="space-y-4">
-                            <div className="grid grid-cols-3 gap-4">
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                               <div className="bg-white rounded-xl p-3 border border-gray-200">
                                 <p className="text-xs text-gray-500">Total Visits</p>
                                 <p className="text-lg font-bold text-gray-900">{detail.total_visits}</p>
@@ -318,6 +379,72 @@ export function SalonCustomers() {
           </table>
         </div>
       </div>
-    </div>
+
+      <AnimatePresence>
+        {showModal && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+            onClick={() => setShowModal(false)}>
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md border border-gray-100">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-lg font-bold text-gray-900">Add Customer</h2>
+                <button type="button" onClick={() => setShowModal(false)} className="p-1 text-gray-400 hover:text-gray-600 rounded-lg"><X className="w-5 h-5" /></button>
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-600 mb-1">Phone *</label>
+                  <input type="text" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                    className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300" placeholder="e.g. 923001234567" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-600 mb-1">Name</label>
+                  <input type="text" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
+                    className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300" placeholder="Customer name" />
+                </div>
+              </div>
+              <div className="flex gap-3 mt-6">
+                <button type="button" onClick={() => setShowModal(false)} className="flex-1 px-4 py-2.5 border border-gray-200 text-gray-600 rounded-xl text-sm font-semibold hover:bg-gray-50 transition-all">Cancel</button>
+                <button type="button" onClick={createCustomer} className="flex-1 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-all">Add Customer</button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {editCustomer && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+            onClick={() => setEditCustomer(null)}>
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md border border-gray-100">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-lg font-bold text-gray-900">Edit Customer</h2>
+                <button type="button" onClick={() => setEditCustomer(null)} className="p-1 text-gray-400 hover:text-gray-600 rounded-lg"><X className="w-5 h-5" /></button>
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-600 mb-1">Phone</label>
+                  <input type="text" value={editCustomer.phone} disabled
+                    className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm bg-gray-50 text-gray-500" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-600 mb-1">Name</label>
+                  <input type="text" value={editCustomer.name} onChange={(e) => setEditCustomer({ ...editCustomer, name: e.target.value })}
+                    className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300" />
+                </div>
+              </div>
+              <div className="flex gap-3 mt-6">
+                <button type="button" onClick={() => setEditCustomer(null)} className="flex-1 px-4 py-2.5 border border-gray-200 text-gray-600 rounded-xl text-sm font-semibold hover:bg-gray-50 transition-all">Cancel</button>
+                <button type="button" onClick={updateCustomer} className="flex-1 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-all">Save</button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </>
   );
 }

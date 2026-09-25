@@ -1,12 +1,12 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { SalonAuthProvider, useSalonAuth } from './salon/SalonAuthContext';
 import { SalonLogin } from './salon/SalonLogin';
 import { SalonLayout } from './salon/SalonLayout';
 import { Loader2 } from 'lucide-react';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 function SalonContent() {
   const { salon, loading } = useSalonAuth();
-  const [activePage, setActivePage] = useState('dashboard');
 
   if (loading) {
     return (
@@ -18,13 +18,15 @@ function SalonContent() {
 
   if (!salon) return <SalonLogin />;
 
-  return <SalonLayout activePage={activePage} setActivePage={setActivePage} />;
+  return <SalonLayout />;
 }
 
 export default function SalonApp() {
   return (
-    <SalonAuthProvider>
-      <SalonContent />
-    </SalonAuthProvider>
+    <ErrorBoundary>
+      <SalonAuthProvider>
+        <SalonContent />
+      </SalonAuthProvider>
+    </ErrorBoundary>
   );
 }

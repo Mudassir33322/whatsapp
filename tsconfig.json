@@ -10,18 +10,26 @@
       "DOM.Iterable"
     ],
     "esModuleInterop": true,
+    "resolveJsonModule": true,
     "skipLibCheck": true,
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
     "moduleResolution": "bundler",
     "isolatedModules": true,
     "moduleDetection": "force",
     "allowJs": true,
     "jsx": "react-jsx",
+    "baseUrl": ".",
     "paths": {
       "@/*": [
-        "./*"
+        "src/*"
       ]
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "include": ["src", "server.ts", "bot.ts", "bot-menus.ts", "db.ts", "types.ts", "utils.ts", "admin-routes.ts", "salon-routes.ts", "notification-service.ts", "server-recurring.ts", "receipt-generator.ts"]
 }

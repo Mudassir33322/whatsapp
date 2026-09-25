@@ -1,0 +1,51 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: autozap:latest
+    container_name: autozap
+    ports:
+      - "3001:3001"
+    # Provide runtime configuration via an .env file (NOT in the image).
+    # .env must contain DB_HOST, DB_USER, DB_PASS, DB_NAME, JWT_SECRET,
+    # REFRESH_SECRET, REDIS_URL (optional), etc. It is gitignored and must
+    # be supplied at runtime.
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+    restart: unless-stopped
+    # redis is optional (profile "cache"); only required when REDIS_URL is set.
+    # Uncomment the MySQL service below if you use MySQL instead of SQLite.
+    # depends_on:
+    #   - mysql
+
+  redis:
+    image: redis:7-alpine
+    container_name: autozap-redis
+    command: ["redis-server", "--save", "60", "1", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    # Only used when REDIS_URL is set on the app service (caching layer).
+    profiles:
+      - cache
+
+  # Optional MySQL service. Uncomment to use a real MySQL database
+  # (set USE_SQLITE=false and point DB_* env vars at this service).
+  # mysql:
+  #   image: mysql:8.0
+  #   container_name: autozap-mysql
+  #   environment:
+  #     MYSQL_ROOT_PASSWORD: autozap_root
+  #     MYSQL_DATABASE: autozap_platform
+  #   ports:
+  #     - "3306:3306"
+  #   volumes:
+  #     - autozap-mysql-data:/var/lib/mysql
+  #   restart: unless-stopped
+
+# volumes:
+#   autozap-mysql-data:

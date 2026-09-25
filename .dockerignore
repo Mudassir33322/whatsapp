@@ -1,0 +1,15 @@
+node_modules
+dist
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+logs
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+auth-info-*
+*.log
+coverage
+.DS_Store

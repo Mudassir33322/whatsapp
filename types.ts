@@ -12,7 +12,9 @@ export interface Salon {
   address?: string;
   description?: string;
   portfolio_url?: string;
+  cover_image?: string;
   cover_image_url?: string;
+  logo?: string;
   logo_url?: string;
   established_year?: number;
   rating?: number;
@@ -87,7 +89,7 @@ export interface Customer {
   loyalty_points: number;
   total_visits: number;
   referral_code?: string;
-  status?: number;
+  status?: string;
   last_active?: string;
 }
 
@@ -117,12 +119,17 @@ export interface Booking {
   id: number;
   salon_id: number;
   customer_phone: string;
+  customer_name?: string;
   service_id: number;
-  staff_id: number;
+  barber_id?: number;
+  staff_id?: number;
   booking_date: string;
   booking_time: string;
-  status: 'pending' | 'confirmed' | 'cancelled' | 'completed';
+  end_time?: string;
+  status: 'pending' | 'confirmed' | 'completed' | 'cancelled' | 'no_show';
   token: string;
+  notes?: string;
+  created_at?: string;
 }
 
 export interface Barber {
@@ -157,6 +164,8 @@ export interface BarberSchedule {
   end_time: string;
   slot_duration: number;
   is_available: boolean;
+  break_start?: string;
+  break_end?: string;
 }
 
 export interface Appointment {
@@ -197,6 +206,15 @@ export interface Product {
   min_stock: number;
   unit: string;
   is_active?: boolean;
+}
+
+export interface Review {
+  id: number;
+  salon_id: number;
+  barber_id?: number;
+  customer_phone: string;
+  rating: number;
+  comment?: string;
 }
 
 export interface Admin {

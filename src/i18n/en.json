@@ -1,0 +1,43 @@
+{
+  "nav": {
+    "dashboard": "Dashboard",
+    "inbox": "Inbox",
+    "locations": "Locations",
+    "salons": "Salons",
+    "admins": "Admins",
+    "appointments": "Appointments",
+    "customers": "Customers",
+    "crm": "CRM",
+    "calendar": "Calendar",
+    "finances": "Finances",
+    "inventory": "Inventory",
+    "audit": "Audit Log",
+    "qr": "Live QR",
+    "sessions": "Sessions",
+    "settings": "Settings"
+  },
+  "common": {
+    "search": "Search by name, phone...",
+    "export": "Export",
+    "signOut": "Sign Out",
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "edit": "Edit",
+    "filter": "Filter",
+    "all": "All",
+    "customers": "Customers",
+    "salons": "Salons",
+    "admins": "Admins"
+  },
+  "dashboard": {
+    "overview": "Overview",
+    "revenue": "Revenue",
+    "appointments": "Appointments",
+    "trend": "Booking Trend",
+    "topSalons": "Top Salons",
+    "topBarbers": "Top Barbers",
+    "salonPerf": "Salon Performance (Bookings)",
+    "recentActivity": "Recent Activity"
+  }
+}

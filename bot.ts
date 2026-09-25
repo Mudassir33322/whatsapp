@@ -31,17 +31,26 @@ import {
   createRecurringBooking,
   getRecurringBookingsByPhone,
   cancelRecurringBooking,
-  logProfileVisit,
-  updateCustomerStatus
+  updateCustomerStatus,
+  getSalonMedia,
+  findNextAvailableSlot,
+  findNextAvailableSlotForAnyBarber,
+  findRescheduleDates
 } from './db';
 import { generateReceiptPDF } from './receipt-generator';
-import { sendBookingAlert, sendVisitAlert } from './notification-service';
+import { sendBookingAlert } from './notification-service';
 import crypto from 'crypto';
 import path from 'path';
+import { appendFile } from 'fs/promises';
 import { writeFile, unlink } from 'fs/promises';
 
+const BASE_URL = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3001}`;
+
+function getCleanPhone(sender: string): string {
+  return normalizePhone(sender);
+}
+
 import { 
-  showWelcomeMenu, 
   showMainMenu,
   showCountries, 
   showCities, 
@@ -49,28 +58,68 @@ import {
   showSalons, 
   showSalonMenu, 
   showServices,
-  showBarbers 
+  showBarbers,
+  M
 } from './bot-menus';
-import { escapeMarkdown, generateToken } from './utils';
+import { escapeMarkdown, generateToken, generateUniqueToken, normalizePhone } from './utils';
+import { processWithAI, isAiAvailable, clearConversation } from './ai';
+import { BOT_CONFIG } from './bot-config';
+
+// ─── Per-sender async mutex (promise chain, not busy-wait) ─────────
+const senderQueues = new Map<string, Promise<void>>();
+
+async function acquireSenderLock(sender: string): Promise<() => void> {
+  const prev = senderQueues.get(sender) || Promise.resolve();
+  let release: () => void;
+  const next = new Promise<void>(resolve => { release = resolve; });
+  senderQueues.set(sender, next);
+  await prev;
+  return () => {
+    if (senderQueues.get(sender) === next) {
+      senderQueues.delete(sender);
+    }
+    release!();
+  };
+}
 
 // ─── Rate limiting ─────────────────────────────────────────────────
-const RATE_LIMIT_WINDOW = 1000;
-const rateLimitMap = new Map<string, number>();
+const rateLimitMap = new Map<string, { time: number }>();
 
 function checkRateLimit(sender: string): boolean {
   const now = Date.now();
-  const lastMsg = rateLimitMap.get(sender) || 0;
-  if (now - lastMsg < RATE_LIMIT_WINDOW) return false;
-  rateLimitMap.set(sender, now);
+  const entry = rateLimitMap.get(sender);
+  if (entry && now - entry.time < BOT_CONFIG.rateLimitWindow) return false;
+  rateLimitMap.set(sender, { time: now });
   return true;
 }
 
+// Periodic cleanup to prevent memory leak
+setInterval(() => {
+  const cutoff = Date.now() - BOT_CONFIG.rateLimitWindow * 10;
+  for (const [key, val] of rateLimitMap) {
+    if (val.time < cutoff) rateLimitMap.delete(key);
+  }
+}, BOT_CONFIG.rateLimitCleanupInterval);
+
 // ─── State timeout ─────────────────────────────────────────────────
-const STATE_TIMEOUT_MS = 30 * 60 * 1000;
+const recentTimeoutMap = new Map<string, number>();
+
+setInterval(() => {
+  const cutoff = Date.now() - BOT_CONFIG.recentTimeoutMs * 2;
+  for (const [key, ts] of recentTimeoutMap) {
+    if (ts < cutoff) recentTimeoutMap.delete(key);
+  }
+}, BOT_CONFIG.rateLimitCleanupInterval);
 
 function isStateExpired(state: any): boolean {
   if (!state || !state.updatedAt) return false;
-  return Date.now() - state.updatedAt > STATE_TIMEOUT_MS;
+  return Date.now() - state.updatedAt > BOT_CONFIG.stateTimeoutMs;
+}
+
+function isRecentlyTimeout(sender: string): boolean {
+  const ts = recentTimeoutMap.get(sender);
+  if (!ts) return false;
+  return Date.now() - ts < BOT_CONFIG.recentTimeoutMs;
 }
 
 function formatSlots(slots: { start: string; end: string }[]): string {
@@ -97,18 +146,33 @@ export async function handleIncomingMessage(
   text: string,
   pushName: string | null | undefined
 ) {
+  const release = await acquireSenderLock(sender);
   try {
+    const pushNameStr: string | undefined = pushName ?? undefined;
     // Rate limiting
     if (!checkRateLimit(sender)) return;
 
     const userInput = text.trim();
     const state = await getBotState(sender) || { step: 'IDLE' };
+    const botLog = async (msg: string) => {
+      if (process.env.NODE_ENV === 'production') return;
+      try { await appendFile('bot_debug.log', `${new Date().toISOString()} ${msg}\n`); } catch {}
+    };
+    if (state.step !== 'IDLE') {
+      await botLog(`sender=${sender} step=${state.step} updatedAt=${state.updatedAt} now=${Date.now()} delta=${state.updatedAt ? (Date.now() - state.updatedAt)/1000 + 's' : 'N/A'}`);
+    }
 
     // State timeout: reset expired states
     if (state.step !== 'IDLE' && isStateExpired(state)) {
-      await saveBotState(sender, { step: 'IDLE' });
+      await botLog(`TIMEOUT for ${sender}: step=${state.step} updatedAt=${state.updatedAt} delta=${(Date.now()-state.updatedAt)/1000}s`);
+      recentTimeoutMap.set(sender, Date.now());
+      try { await saveBotState(sender, { step: 'IDLE' }); } catch (e: any) { await botLog(`saveBotState after timeout failed: ${e.message}`); }
       await sendMessage(sender, `⏰ Timeout. Koi bhi message bhejein nayi booking shuru karne ke liye.`);
       return;
+    }
+    // Prevent re-timeout loop: if user just timed out, treat their next message in IDLE
+    if (state.step === 'IDLE' && isRecentlyTimeout(sender)) {
+      recentTimeoutMap.delete(sender);
     }
 
     const name = pushName || 'Dear Customer';
@@ -119,26 +183,26 @@ export async function handleIncomingMessage(
     // --- Handle MENU command (go back to main menu) ---
     if (/^(MENU|MAIN\s+MENU)$/i.test(userInput)) {
       await saveBotState(sender, { step: 'IDLE' });
-      await showMainMenu(sendMessage, sender, pushName);
+      await showMainMenu(sendMessage, sender, pushNameStr);
       return;
     }
 
-    // --- Back handler: go to IDLE if user types 00 in non-selection contexts ---
-    if (userInput === '00' && !['SELECT_COUNTRY', 'SELECT_CITY', 'SELECT_AREA', 'SELECT_SALON', 'SHOW_SALON_MENU', 'SELECT_SERVICE', 'SELECT_BARBER', 'SELECT_SLOT', 'CONFIRM_BOOKING', 'SELECT_DATE', 'RESCHEDULE_DATE', 'RESCHEDULE_SLOT', 'RESCHEDULE_CONFIRM', 'RECURRING_CHOOSE'].includes(state.step || '')) {
+    // --- Back to IDLE if user types 00 from unsupported steps ---
+    if (userInput === '00' && !['SELECT_COUNTRY', 'SELECT_CITY', 'SELECT_AREA', 'SELECT_SALON', 'SHOW_SALON_MENU', 'SELECT_SERVICE', 'SELECT_BARBER', 'SELECT_SLOT', 'CONFIRM_BOOKING', 'RESCHEDULE_DATE', 'RESCHEDULE_SLOT', 'RESCHEDULE_CONFIRM', 'RECURRING_CHOOSE', 'RECURRING_DAY', 'GALLERY'].includes(state.step || '')) {
       await saveBotState(sender, { step: 'IDLE' });
-      await showMainMenu(sendMessage, sender, pushName);
+      await showMainMenu(sendMessage, sender, pushNameStr);
       return;
     }
 
     // --- Handle 0 as Main Menu ---
     if (userInput === '0') {
       await saveBotState(sender, { step: 'IDLE' });
-      await showMainMenu(sendMessage, sender, pushName);
+      await showMainMenu(sendMessage, sender, pushNameStr);
       return;
     }
 
     // --- Handle token lookup via #TOKEN ---
-    if (/^#[A-Z0-9]{5}$/.test(userInput.toUpperCase())) {
+    if (/^#[A-Z0-9]{8}$/.test(userInput.toUpperCase())) {
       const token = userInput.toUpperCase();
       const apt = await getAppointmentByToken(token);
       if (!apt) {
@@ -151,15 +215,15 @@ export async function handleIncomingMessage(
       const currentStatus = apt.status || 'pending';
       const msg = `┌─────────────────────────┐\n│   📋 *BOOKING DETAILS*   │\n└─────────────────────────┘\n\n` +
         `🔖 Token: *${token}*\n📌 Status: ${statusIcon[currentStatus] || '⏳'} *${(currentStatus).toUpperCase()}*\n\n` +
-        `🏪 *${escapeMarkdown(apt.salon_name)}*\n💇 ${escapeMarkdown(apt.barber_name)}\n✂️ ${escapeMarkdown(apt.service_name)}\n📅 ${date} | ⏰ ${apt.appointment_time}\n\n` +
+        `🏪 *${escapeMarkdown(apt.salon_name || '')}*\n💇 ${escapeMarkdown(apt.barber_name || '')}\n✂️ ${escapeMarkdown(apt.service_name || '')}\n📅 ${date} | ⏰ ${apt.appointment_time}\n\n` +
         `📋 *Timeline:*\n${statusLine('Booked', true)}\n${statusLine('Confirmed', ['confirmed', 'in_progress', 'completed'].includes(currentStatus))}\n${statusLine('In Progress', ['in_progress', 'completed'].includes(currentStatus))}\n${statusLine('Completed', currentStatus === 'completed')}\n\n` +
         `💡 *RESCHEDULE ${token}* — change date/time\n💡 *RATE ${token}* — give rating\n💡 *CANCEL ${token}* — cancel booking`;
       await sendMessage(sender, msg);
       return;
     }
 
-    if (/^CANCEL\s+#[A-Z0-9]{5}$/i.test(userInput)) {
-      const token = userInput.toUpperCase().replace(/^CANCEL\s+/, '');
+if (/^CANCEL\s+#[A-Z0-9]{8}\s*$/i.test(userInput)) {
+      const token = userInput.toUpperCase().replace(/^CANCEL\s+/, '').trim();
       const cancelled = await cancelAppointmentByToken(token);
       if (cancelled) {
         await sendMessage(sender, `✅ Appointment *${token}* successfully cancelled.`);
@@ -169,9 +233,56 @@ export async function handleIncomingMessage(
       return;
     }
 
+    // --- Handle RATE #TOKEN command (works from any state) ---
+    const rateCmdMatch = userInput.match(/^RATE\s+#[A-Z0-9]{8}\s*$/i);
+    if (rateCmdMatch) {
+      if (state.step !== 'IDLE') {
+        await saveBotState(sender, { step: 'IDLE' });
+      }
+      const token = userInput.toUpperCase().replace(/^RATE\s+/, '').trim();
+      const apt = await getAppointmentByToken(token);
+      if (!apt) {
+        await sendMessage(sender, `❌ Token ${token} nahi mila.`);
+        return;
+      }
+      await sendMessage(sender, `⭐ Apni booking ke liye rating bhejein:\n\n1️⃣ ⭐\n2️⃣ ⭐⭐\n3️⃣ ⭐⭐⭐\n4️⃣ ⭐⭐⭐⭐\n5️⃣ ⭐⭐⭐⭐⭐\n\nToken: ${token}`);
+      return;
+    }
+
+    // --- Handle RESCHEDULE #TOKEN command (works from any state) ---
+    const reschedCmdMatch = userInput.match(/^RESCHEDULE\s+#[A-Z0-9]{8}\s*$/i);
+    if (reschedCmdMatch) {
+      if (state.step !== 'IDLE') {
+        await saveBotState(sender, { step: 'IDLE' });
+      }
+      const token = userInput.toUpperCase().replace(/^RESCHEDULE\s+/, '').trim();
+      const apt = await getAppointmentByToken(token);
+      if (!apt) {
+        await sendMessage(sender, `❌ Token ${token} nahi mila.`);
+        return;
+      }
+      // Find next available dates for reschedule
+      const today = new Date().toISOString().split('T')[0];
+      const dates = await findRescheduleDates(apt.barber_id, today);
+      if (dates.length === 0) {
+        await sendMessage(sender, `❌ Is appointment ke liye koi dates available nahi hain.`);
+        return;
+      }
+      let msg = `🔄 *Reschedule ${token}*\n\nSelect new date:\n\n`;
+      for (let i = 0; i < dates.length; i++) {
+        const d = new Date(dates[i]);
+        const label = d.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
+        msg += `${i + 1}. ${label}\n`;
+      }
+      msg += `\n00: Back`;
+      await sendMessage(sender, msg);
+      await saveBotState(sender, { step: 'RESCHEDULE_DATE', context: { barberId: apt.barber_id, token, dates } });
+      return;
+    }
+
     // --- Handle RECURRING command (list/manage recurring bookings) ---
     if (/^RECURRING/i.test(userInput)) {
-      const phone = sender.replace('@s.whatsapp.net', '');
+      const phone = getCleanPhone(sender);
       // Handle CANCEL_RECURRING <id>
       const cancelMatch = userInput.match(/^RECURRING\s+CANCEL\s+(\d+)$/i);
       if (cancelMatch) {
@@ -207,7 +318,10 @@ export async function handleIncomingMessage(
 
     // --- Handle PROFILE command (works from any state) ---
     if (/^(MY\s+)?PROFILE$/i.test(userInput)) {
-      const phone = sender.replace('@s.whatsapp.net', '');
+      if (state.step !== 'IDLE') {
+        await saveBotState(sender, { step: 'IDLE' });
+      }
+      const phone = getCleanPhone(sender);
       const customer = await getCustomerByPhone(phone);
       if (!customer) {
         await sendMessage(sender, `❌ Aapka koi profile nahi mila. Pehle ek booking karein taake profile create ho.`);
@@ -222,7 +336,10 @@ export async function handleIncomingMessage(
 
     // --- Handle MY BOOKINGS command (works from any state) ---
     if (/^(MY\s+)?(BOOKINGS?|APPOINTMENTS?)$/i.test(userInput)) {
-      const phone = sender.replace('@s.whatsapp.net', '');
+      if (state.step !== 'IDLE') {
+        await saveBotState(sender, { step: 'IDLE' });
+      }
+      const phone = getCleanPhone(sender);
       const bookings = await getBookingsByPhone(phone);
       if (bookings.length === 0) {
         await sendMessage(sender, `❌ Aapki koi booking nahi hai. Koi bhi message bhejein nayi booking karne ke liye.`);
@@ -231,9 +348,9 @@ export async function handleIncomingMessage(
       const recent = bookings.slice(0, 5);
       let msg = `┌─────────────────────────┐\n│   📋 *BOOKING HISTORY*    │\n│   (Last ${recent.length} of ${bookings.length})    │\n└─────────────────────────┘\n\n`;
       for (const b of recent) {
-        const date = new Date(b.booking_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+        const date = new Date(b.appointment_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
         const statusIcon = b.status === 'completed' ? '✅' : b.status === 'confirmed' ? '🟢' : b.status === 'cancelled' ? '❌' : b.status === 'in_progress' ? '🔄' : '⏳';
-        msg += `┌─ # ${b.token} ${statusIcon}\n│ 🏪 ${b.salon_name}\n│ 💇 ${b.service_name}\n│ 📅 ${date} | ⏰ ${b.booking_time}\n│ 📌 *${(b.status || '').toUpperCase()}*\n└─────────\n\n`;
+        msg += `┌─ # ${b.token} ${statusIcon}\n│ 🏪 ${b.salon_name}\n│ 💇 ${b.service_name}\n│ 📅 ${date} | ⏰ ${b.appointment_time?.slice(0,5)}\n│ 📌 *${(b.status || '').toUpperCase()}*\n└─────────\n\n`;
       }
       msg += `💡 *Token* bhej kar details dekhein\n📌 *HELP* for all commands`;
       await sendMessage(sender, msg);
@@ -242,10 +359,13 @@ export async function handleIncomingMessage(
 
     // --- Handle HELP command (works from any state) ---
     if (/^(HELP|MENU|COMMANDS)$/i.test(userInput)) {
-      const lang = await getCustomerPreference(sender.replace('@s.whatsapp.net', ''), 'lang');
+      if (state.step !== 'IDLE') {
+        await saveBotState(sender, { step: 'IDLE' });
+      }
+      const lang = await getCustomerPreference(getCleanPhone(sender), 'lang');
       if (lang === 'urdu') {
         const msg = `📖 *دستیاب کمانڈز*\n\n` +
-          `📅 کوئی بھی میسج — نئی بکنگ شروع کریں\n` +
+          `1. نئی بکنگ شروع کریں\n` +
           `👤 *PROFILE* — اپنا پروفائل دیکھیں\n` +
           `📋 *BOOKINGS* — اپنی بکنگز دیکھیں\n` +
           `🔍 *#TOKEN* — ٹوکن سے بکنگ کی تفصیل\n` +
@@ -264,7 +384,7 @@ export async function handleIncomingMessage(
         await sendMessage(sender, msg);
       } else {
         const msg = `📖 *Available Commands*\n\n` +
-          `📅 Any message — Start new booking\n` +
+          `1. Start new booking\n` +
           `👤 *PROFILE* — View your profile\n` +
           `📋 *BOOKINGS* — View your bookings\n` +
           `🔍 *#TOKEN* — Booking details by token\n` +
@@ -286,11 +406,12 @@ export async function handleIncomingMessage(
     }
 
     // --- RATE #TOKEN <rating> [comment] ---
-    const rateMatch = userInput.match(/^RATE\s+#([A-Z0-9]{5})(\s+(\d))(\s+(.+))?$/i);
+    const rateMatch = userInput.match(/^RATE\s+#([A-Z0-9]{8})\s+([1-5])(\s+(.+))?\s*$/i);
     if (rateMatch) {
       const token = '#' + rateMatch[1].toUpperCase();
-      const rating = parseInt(rateMatch[3]);
-      const comment = rateMatch[5]?.trim() || '';
+      const rating = parseInt(rateMatch[2]);
+      const comment = rateMatch[4]?.trim() || '';
+      await saveBotState(sender, { step: 'IDLE' });
       if (rating < 1 || rating > 5) {
         await sendMessage(sender, `❌ Rating 1 se 5 ke darmiyan hona chahiye.\nExample: RATE #A7K2 5`);
         return;
@@ -300,7 +421,7 @@ export async function handleIncomingMessage(
         await sendMessage(sender, `❌ Token ${token} nahi mila.`);
         return;
       }
-      if (apt.customer_phone !== sender.replace('@s.whatsapp.net', '')) {
+      if (apt.customer_phone !== normalizePhone(sender)) {
         await sendMessage(sender, `❌ Ye booking aapki nahi hai.`);
         return;
       }
@@ -320,7 +441,7 @@ export async function handleIncomingMessage(
     }
 
     // --- RESCHEDULE #TOKEN start ---
-    const reschedMatch = userInput.match(/^RESCHEDULE\s+#([A-Z0-9]{5})$/i);
+    const reschedMatch = userInput.match(/^RESCHEDULE\s+#([A-Z0-9]{8})\s*$/i);
     if (reschedMatch) {
       const token = '#' + reschedMatch[1].toUpperCase();
       const apt = await getAppointmentByToken(token);
@@ -328,7 +449,7 @@ export async function handleIncomingMessage(
         await sendMessage(sender, `❌ Token ${token} nahi mila.`);
         return;
       }
-      if (apt.customer_phone !== sender.replace('@s.whatsapp.net', '')) {
+      if (apt.customer_phone !== normalizePhone(sender)) {
         await sendMessage(sender, `❌ Ye booking aapki nahi hai.`);
         return;
       }
@@ -360,6 +481,9 @@ export async function handleIncomingMessage(
 
     // --- OFFERS command ---
     if (/^OFFERS$/i.test(userInput)) {
+      if (state.step !== 'IDLE') {
+        await saveBotState(sender, { step: 'IDLE' });
+      }
       const offers = await getActiveOffersAll();
       if (offers.length === 0) {
         await sendMessage(sender, `❌ Filhaal koi active offer nahi hai.`);
@@ -379,7 +503,10 @@ export async function handleIncomingMessage(
     // --- FAV BARBER command ---
     const favMatch = userInput.match(/^FAV\s+BARBER\s*(\d+)?$/i);
     if (favMatch) {
-      const phone = sender.replace('@s.whatsapp.net', '');
+      if (state.step !== 'IDLE') {
+        await saveBotState(sender, { step: 'IDLE' });
+      }
+      const phone = getCleanPhone(sender);
       const barberId = favMatch[1] ? parseInt(favMatch[1]) : null;
       if (barberId) {
         await setCustomerPreference(phone, 'fav_barber', String(barberId));
@@ -397,7 +524,10 @@ export async function handleIncomingMessage(
 
     // --- LOCATION command ---
     if (/^LOCATION$/i.test(userInput)) {
-      const phone = sender.replace('@s.whatsapp.net', '');
+      if (state.step !== 'IDLE') {
+        await saveBotState(sender, { step: 'IDLE' });
+      }
+      const phone = getCleanPhone(sender);
       const bookings = await getBookingsByPhone(phone);
       if (bookings.length === 0) {
         await sendMessage(sender, `❌ Aapki koi booking nahi hai. Pehle book karein.`);
@@ -419,7 +549,10 @@ export async function handleIncomingMessage(
 
     // --- REFER command ---
     if (/^REFER$/i.test(userInput)) {
-      const phone = sender.replace('@s.whatsapp.net', '');
+      if (state.step !== 'IDLE') {
+        await saveBotState(sender, { step: 'IDLE' });
+      }
+      const phone = getCleanPhone(sender);
       const customer = await getCustomerByPhone(phone);
       const name = customer?.name || 'Customer';
       const code = await getOrCreateReferralCode(phone, name);
@@ -431,7 +564,10 @@ export async function handleIncomingMessage(
     // --- LANG command ---
     const langMatch = userInput.match(/^LANG\s+(URDU|ENGLISH)$/i);
     if (langMatch) {
-      const phone = sender.replace('@s.whatsapp.net', '');
+      if (state.step !== 'IDLE') {
+        await saveBotState(sender, { step: 'IDLE' });
+      }
+      const phone = getCleanPhone(sender);
       const lang = langMatch[1].toLowerCase();
       await setCustomerPreference(phone, 'lang', lang);
       const reply = lang === 'urdu'
@@ -441,14 +577,41 @@ export async function handleIncomingMessage(
       return;
     }
 
+    // --- NEXT <barber_id> command (find next available slot) ---
+    const nextMatch = userInput.match(/^NEXT\s+(\d+)$/i);
+    if (nextMatch) {
+      if (state.step !== 'IDLE') {
+        await saveBotState(sender, { step: 'IDLE' });
+      }
+      const barberId = parseInt(nextMatch[1]);
+      const today = new Date().toISOString().split('T')[0];
+      const slots = await getAvailableSlots(barberId, today);
+      if (slots.length > 0) {
+        await sendMessage(sender, `✅ Barber #${barberId} ke aaj bhi slots hain!\n\n${formatSlots(slots)}\n\nBook karne ke liye salon select karein.`);
+        return;
+      }
+      const nextSlot = await findNextAvailableSlot(barberId, today);
+      if (nextSlot) {
+        const nextDate = new Date(nextSlot.date);
+        const nextDisplay = nextDate.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+        await sendMessage(sender, `📅 Barber #${barberId} ke liye agli available slot:\n🗓️ ${nextDisplay}\n⏰ ${nextSlot.slot.start} – ${nextSlot.slot.end}\n\nBook karne ke liye salon select karein.`);
+        return;
+      }
+      await sendMessage(sender, `❌ Barber #${barberId} ke agle 30 din mein koi slots available nahi hain.`);
+      return;
+    }
+
     // --- SLOT <barber_id> command ---
     const slotMatch = userInput.match(/^SLOT\s+(\d+)$/i);
     if (slotMatch) {
+      if (state.step !== 'IDLE') {
+        await saveBotState(sender, { step: 'IDLE' });
+      }
       const barberId = parseInt(slotMatch[1]);
       const today = new Date().toISOString().split('T')[0];
       const slots = await getAvailableSlots(barberId, today);
       if (slots.length === 0) {
-        await sendMessage(sender, `❌ Barber #${barberId} ke aaj koi slots available nahi hain.`);
+        await sendMessage(sender, `❌ Barber #${barberId} ke aaj koi slots available nahi hain.\n\n"NEXT ${barberId}" type karein agli available slot ke liye.`);
         return;
       }
       let msg = `┌─────────────────────────┐\n│   ⏰ *TODAY'S SLOTS*     │\n│   Barber #${barberId}            │\n└─────────────────────────┘\n\n${formatSlots(slots)}\n\n💡 Book karne ke liye koi bhi message bhejein.`;
@@ -458,6 +621,9 @@ export async function handleIncomingMessage(
 
     // --- NEARBY command ---
     if (/^NEARBY$/i.test(userInput)) {
+      if (state.step !== 'IDLE') {
+        await saveBotState(sender, { step: 'IDLE' });
+      }
       const salons = await getAllSalons();
       if (salons.length === 0) {
         await sendMessage(sender, `❌ Koi salon available nahi hai.`);
@@ -473,15 +639,23 @@ export async function handleIncomingMessage(
     }
 
     // --- Handle cancel ---
-    if ((userInput.toUpperCase() === 'CANCEL' || userInput === '00') && state.step !== 'IDLE') {
+    if (userInput.toUpperCase().trim() === 'CANCEL' && state.step !== 'IDLE') {
       await saveBotState(sender, { step: 'IDLE' });
-      await showMainMenu(sendMessage, sender, pushName);
+      await showMainMenu(sendMessage, sender, pushNameStr);
+      return;
+    }
+
+    // --- Gallery back handler ---
+    if (state.step === 'GALLERY' && (userInput === '00' || userInput.toUpperCase() === 'BACK')) {
+      const ctx = state.context;
+      await showSalonMenu(sendMessage, sender, { id: ctx.salonId, name: ctx.salonName } as any);
+      await saveBotState(sender, { step: 'SHOW_SALON_MENU', context: { countryId: ctx.countryId, cityId: ctx.cityId, areaId: ctx.areaId, salonId: ctx.salonId, salonName: ctx.salonName } });
       return;
     }
 
     // --- Back handler ---
     if (userInput === '00' || userInput.toUpperCase() === 'BACK') {
-      await updateCustomerStatus(sender.replace('@s.whatsapp.net', ''), 'Going Back');
+      // Skip updateCustomerStatus — unnecessary DB write on back navigation
       if (state.step === 'RESCHEDULE_DATE') {
 
         await saveBotState(sender, { step: 'IDLE' });
@@ -497,7 +671,7 @@ export async function handleIncomingMessage(
           const label = d.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
           msg += `${i + 1}. ${label}\n`;
         }
-        msg += `\n00: Cancel`;
+        msg += `\n00: Back`;
         await sendMessage(sender, msg);
         await saveBotState(sender, { step: 'RESCHEDULE_DATE', context: ctx });
         return;
@@ -509,9 +683,14 @@ export async function handleIncomingMessage(
         await saveBotState(sender, { step: 'RESCHEDULE_SLOT', context: ctx });
         return;
       }
-      if (state.step === 'SELECT_CITY') {
+      if (state.step === 'SELECT_COUNTRY') {
         await saveBotState(sender, { step: 'IDLE' });
+        await showMainMenu(sendMessage, sender, pushNameStr);
+        return;
+      }
+      if (state.step === 'SELECT_CITY') {
         await showCountries(sendMessage, sender);
+        await saveBotState(sender, { step: 'SELECT_COUNTRY' });
         return;
       }
       if (state.step === 'SELECT_AREA') {
@@ -546,10 +725,73 @@ export async function handleIncomingMessage(
       }
       if (state.step === 'CONFIRM_BOOKING') {
         const ctx = state.context;
+        delete ctx.autoSlots;
         const slots = await getAvailableSlots(ctx.barberId, ctx.selectedDate);
         await sendMessage(sender, `Available slots:\n\n${formatSlots(slots)}\n\n00: Back\n${M}`);
         await saveBotState(sender, { step: 'SELECT_SLOT', context: ctx });
         return;
+      }
+      if (state.step === 'RECURRING_CHOOSE') {
+        await sendMessage(sender, `OK, recurring nahi karenge. Koi bhi message bhejein nayi booking ke liye.`);
+        await saveBotState(sender, { step: 'IDLE' });
+        return;
+      }
+    }
+
+    // =========== AI NATURAL LANGUAGE HANDLER ===========
+    // Jab AI enable ho to natural language samjhe
+    if (state.step === 'IDLE' && isAiAvailable()) {
+      const aiResult = await processWithAI(sender, userInput);
+      if (aiResult) {
+        switch (aiResult.action) {
+          case 'BOOK':
+            await showCountries(sendMessage, sender);
+            await saveBotState(sender, { step: 'SELECT_COUNTRY' });
+            return;
+          case 'PROFILE':
+            // fall through to existing profile handler
+            break;
+          case 'BOOKINGS':
+            // fall through
+            break;
+          case 'RATE': {
+            const token = aiResult.params.token;
+            const rating = aiResult.params.rating;
+            const comment = aiResult.params.comment || '';
+            if (token && rating >= 1 && rating <= 5) {
+              const apt = await getAppointmentByToken(token);
+               if (apt && apt.customer_phone === normalizePhone(sender)) {
+                try {
+                  await createReview({
+                    salon_id: apt.salon_id,
+                    barber_id: apt.barber_id,
+                    customer_phone: apt.customer_phone,
+                    rating,
+                    comment
+                  });
+                  await sendMessage(sender, `✅ ${'⭐'.repeat(rating)} Thank you for your review!${comment ? `\n📝 "${comment}"` : ''}`);
+                } catch {
+                  await sendMessage(sender, `❌ Review submit nahi ho saka.`);
+                }
+              } else {
+                await sendMessage(sender, `❌ Token ${token} nahi mila ya ye aapki booking nahi hai.`);
+              }
+            }
+            return;
+          }
+          case 'GREETING':
+            await sendMessage(sender, aiResult.reply);
+            return;
+          case 'UNKNOWN':
+            await sendMessage(sender, aiResult.reply);
+            return;
+          default:
+            // For other actions, show the AI's response and fall through
+            if (aiResult.reply) {
+              await sendMessage(sender, aiResult.reply);
+            }
+            return;
+        }
       }
     }
 
@@ -558,10 +800,11 @@ export async function handleIncomingMessage(
     if (state.step === 'IDLE') {
       if (userInput === '1') {
         await showCountries(sendMessage, sender);
+        await saveBotState(sender, { step: 'SELECT_COUNTRY' });
         return;
       }
       if (userInput === '2') {
-        const phone = sender.replace('@s.whatsapp.net', '');
+        const phone = getCleanPhone(sender);
         const customer = await getCustomerByPhone(phone);
         if (!customer) {
           await sendMessage(sender, `❌ Aapka koi profile nahi mila. Pehle ek booking karein.\n\n${M}`);
@@ -573,7 +816,7 @@ export async function handleIncomingMessage(
         return;
       }
       if (userInput === '3') {
-        const phone = sender.replace('@s.whatsapp.net', '');
+        const phone = getCleanPhone(sender);
         const bookings = await getBookingsByPhone(phone);
         if (!bookings || bookings.length === 0) {
           await sendMessage(sender, `❌ Aapki koi booking nahi hai.\n\n${M}`);
@@ -585,7 +828,7 @@ export async function handleIncomingMessage(
           msg += `Koi active booking nahi hai.\n`;
         } else {
           active.slice(0, 5).forEach((b: any, i: number) => {
-            msg += `${i + 1}. ${b.salon_name} | ${b.service_name}\n   📅 ${b.appointment_date} ⏰ ${b.appointment_time}\n   🎫 ${b.token}\n\n`;
+            msg += `${i + 1}. ${b.salon_name} | ${b.service_name}\n   📅 ${b.appointment_date} ⏰ ${b.appointment_time?.slice(0,5)}\n   🎫 ${b.token}\n\n`;
           });
         }
         msg += `${M}`;
@@ -593,7 +836,7 @@ export async function handleIncomingMessage(
         return;
       }
       if (userInput === '4') {
-        const phone = sender.replace('@s.whatsapp.net', '');
+        const phone = getCleanPhone(sender);
         const bookings = await getBookingsByPhone(phone);
         const history = bookings ? bookings.filter((b: any) => ['completed', 'cancelled', 'no_show'].includes(b.status)) : [];
         if (history.length === 0) {
@@ -602,7 +845,7 @@ export async function handleIncomingMessage(
         }
         let msg = `📜 *Booking History*\n\n`;
         history.slice(0, 10).forEach((b: any, i: number) => {
-          msg += `${i + 1}. ${b.salon_name} | ${b.service_name}\n   📅 ${b.appointment_date} ⏰ ${b.appointment_time}\n   📌 ${b.status}\n\n`;
+          msg += `${i + 1}. ${b.salon_name} | ${b.service_name}\n   📅 ${b.appointment_date} ⏰ ${b.appointment_time?.slice(0,5)}\n   📌 ${b.status}\n\n`;
         });
         msg += `${M}`;
         await sendMessage(sender, msg);
@@ -633,7 +876,6 @@ export async function handleIncomingMessage(
 
     if (state.step === 'SELECT_COUNTRY') {
       const countries = await getAllCountries();
-      await updateCustomerStatus(sender.replace('@s.whatsapp.net', ''), 'Selecting Country');
       let countryId: number | null = null;
       const listMatch = userInput.match(/^COUNTRY_(\d+)$/);
       if (listMatch) {
@@ -655,7 +897,6 @@ export async function handleIncomingMessage(
 
     if (state.step === 'SELECT_CITY') {
       const cities = await getCitiesByCountry(state.context.countryId);
-      await updateCustomerStatus(sender.replace('@s.whatsapp.net', ''), 'Selecting City');
       let cityId: number | null = null;
       const listMatch = userInput.match(/^CITY_(\d+)$/);
       if (listMatch) {
@@ -677,7 +918,6 @@ export async function handleIncomingMessage(
 
     if (state.step === 'SELECT_AREA') {
       const areas = await getAreasByCity(state.context.cityId);
-      await updateCustomerStatus(sender.replace('@s.whatsapp.net', ''), 'Selecting Area');
       let areaId: number | null = null;
       const listMatch = userInput.match(/^AREA_(\d+)$/);
       if (listMatch) {
@@ -701,7 +941,6 @@ export async function handleIncomingMessage(
     if (state.step === 'SELECT_SALON') {
       const ctx = state.context;
       const salons = await getSalonsByLocation(ctx.countryId, ctx.cityId, ctx.areaId);
-      await updateCustomerStatus(sender.replace('@s.whatsapp.net', ''), 'Selecting Salon');
       let salon: any = null;
       const listMatch = userInput.match(/^SALON_(\d+)$/);
       if (listMatch) {
@@ -717,20 +956,6 @@ export async function handleIncomingMessage(
         return;
       }
 
-      // Track visit
-      const customerPhone = sender.replace('@s.whatsapp.net', '');
-      try {
-        await logProfileVisit(salon.id, customerPhone);
-        await sendVisitAlert({
-          salon_id: salon.id,
-          salon_name: salon.name,
-          customer_name: pushName || 'Customer',
-          customer_phone: customerPhone
-        });
-      } catch (e) {
-        console.error('[Bot] Tracking error:', e);
-      }
-
       await showSalonMenu(sendMessage, sender, salon);
       await saveBotState(sender, { step: 'SHOW_SALON_MENU', context: { ...ctx, salonId: salon.id, salonName: salon.name } });
       return;
@@ -738,11 +963,11 @@ export async function handleIncomingMessage(
 
     if (state.step === 'SHOW_SALON_MENU') {
       const ctx = state.context;
-      await updateCustomerStatus(sender.replace('@s.whatsapp.net', ''), `Viewing Salon: ${ctx.salonName}`);
       const menuBook = ['1', 'MENU_BOOK'].includes(userInput);
       const menuOffers = ['2', 'MENU_OFFERS'].includes(userInput);
       const menuReviews = ['3', 'MENU_REVIEWS'].includes(userInput);
       const menuInfo = ['4', 'MENU_INFO'].includes(userInput);
+      const menuGallery = ['5', 'MENU_GALLERY'].includes(userInput);
       if (menuBook) {
         await showServices(sendMessage, sender, ctx.salonId);
         await saveBotState(sender, { step: 'SELECT_SERVICE', context: ctx });
@@ -758,7 +983,7 @@ export async function handleIncomingMessage(
             msg += `*${escapeMarkdown(o.title)}*\n`;
             if (o.description) msg += `${escapeMarkdown(o.description)}\n`;
             if (o.discount_percent) msg += `Discount: ${o.discount_percent}%\n`;
-            msg += `Valid till: ${new Date(o.valid_until!).toLocaleDateString('en-IN')}\n\n`;
+            msg += `Valid till: ${o.valid_until ? new Date(o.valid_until).toLocaleDateString('en-IN') : 'N/A'}\n\n`;
           }
           await sendMessage(sender, msg);
         }
@@ -797,6 +1022,26 @@ export async function handleIncomingMessage(
         await showSalonMenu(sendMessage, sender, { id: ctx.salonId, name: ctx.salonName } as any);
         return;
       }
+      if (menuGallery) {
+        const media = await getSalonMedia(ctx.salonId);
+        if (media.length === 0) {
+          await sendMessage(sender, `❌ Is salon mein abhi koi gallery images nahi hain.`);
+          await showSalonMenu(sendMessage, sender, { id: ctx.salonId, name: ctx.salonName } as any);
+          return;
+        }
+        let msg = `🖼️ *${escapeMarkdown(ctx.salonName)} — Gallery*\n\n`;
+        for (let i = 0; i < media.length; i++) {
+          const m = media[i];
+          const typeIcon = m.media_type === 'video' ? '🎬' : '🖼️';
+          msg += `${i + 1}. ${typeIcon} ${escapeMarkdown(m.title || 'Untitled')}`;
+          if (m.description) msg += `\n   ${escapeMarkdown(m.description)}`;
+          msg += `\n\n`;
+        }
+        msg += `00: Wapas\n${M}`;
+        await sendMessage(sender, msg);
+        await saveBotState(sender, { step: 'GALLERY', context: { ...ctx, media } });
+        return;
+      }
       await sendMessage(sender, `❌ Invalid option. Please select a valid option.`);
       return;
     }
@@ -804,7 +1049,11 @@ export async function handleIncomingMessage(
     if (state.step === 'SELECT_SERVICE') {
       const ctx = state.context;
       const services = await getServicesBySalon(ctx.salonId);
-      await updateCustomerStatus(sender.replace('@s.whatsapp.net', ''), 'Selecting Service');
+      if (services.length === 0) {
+        await sendMessage(sender, `❌ Is salon mein koi service available nahi hai.\n\nMENU type karke wapas jayein.`);
+        await saveBotState(sender, { step: 'IDLE' });
+        return;
+      }
       let service: any = null;
       const listMatch = userInput.match(/^SERVICE_(\d+)$/);
       if (listMatch) {
@@ -821,14 +1070,18 @@ export async function handleIncomingMessage(
       }
       const barbers = await getBarbersBySalon(ctx.salonId);
       await showBarbers(sendMessage, sender, barbers);
-      await saveBotState(sender, { step: 'SELECT_BARBER', context: { ...ctx, serviceId: service.id, serviceName: service.name, servicePrice: service.price, serviceDuration: service.duration } });
+      await saveBotState(sender, { step: 'SELECT_BARBER', context: { ...ctx, barbers, serviceId: service.id, serviceName: service.name, servicePrice: service.price, serviceDuration: service.duration } });
       return;
     }
 
     if (state.step === 'SELECT_BARBER') {
       const ctx = state.context;
-      const barbers = await getBarbersBySalon(ctx.salonId);
-      await updateCustomerStatus(sender.replace('@s.whatsapp.net', ''), 'Selecting Barber');
+      const barbers = state.context.barbers || await getBarbersBySalon(ctx.salonId);
+      if (barbers.length === 0) {
+        await sendMessage(sender, `❌ Is salon mein koi barber available nahi hai.\n\nMENU type karke wapas jayein.`);
+        await saveBotState(sender, { step: 'IDLE' });
+        return;
+      }
       let barber: any = null;
       const listMatch = userInput.match(/^BARBER_(\d+)$/);
       if (listMatch) {
@@ -842,21 +1095,6 @@ export async function handleIncomingMessage(
       if (!barber) {
         await sendMessage(sender, `❌ Invalid choice. Please select a barber from the list.`);
         return;
-      }
-
-      // Track visit
-      const customerPhone = sender.replace('@s.whatsapp.net', '');
-      try {
-        await logProfileVisit(ctx.salonId, customerPhone, barber.id);
-        await sendVisitAlert({
-          salon_id: ctx.salonId,
-          salon_name: ctx.salonName,
-          customer_name: pushName || 'Customer',
-          customer_phone: customerPhone,
-          barber_name: barber.name
-        });
-      } catch (e) {
-        console.error('[Bot] Tracking error:', e);
       }
 
       const today = new Date();
@@ -876,12 +1114,53 @@ export async function handleIncomingMessage(
           await saveBotState(sender, { step: 'SELECT_SLOT', context: { ...ctx, barberId: barber.id, barberName: barber.name, selectedDate: tomorrowStr } });
           return;
         }
-        await sendMessage(sender, `Kal bhi koi slots nahi hain. Baad mein dobara try karein.`);
+        // Auto-find next available slot
+        const nextSlot = await findNextAvailableSlot(barber.id, tomorrowStr);
+        if (nextSlot) {
+          const nextDate = new Date(nextSlot.date);
+          const nextDisplay = nextDate.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+          await sendMessage(sender, `✅ *${escapeMarkdown(barber.name)}* ke liye agli available slot:\n📅 ${nextDisplay}\n⏰ ${nextSlot.slot.start} – ${nextSlot.slot.end}\n\n1️⃣ Is slot ko book karein\n00: Back\n${M}`);
+          await saveBotState(sender, {
+            step: 'SELECT_SLOT',
+            context: { ...ctx, barberId: barber.id, barberName: barber.name, selectedDate: nextSlot.date, autoSlots: [nextSlot.slot] }
+          });
+          return;
+        }
+        // Check any barber in this salon
+        const anyBarber = await findNextAvailableSlotForAnyBarber(ctx.salonId, ctx.serviceDuration || 30, tomorrowStr);
+        if (anyBarber) {
+          const nextDate = new Date(anyBarber.date);
+          const nextDisplay = nextDate.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+          await sendMessage(sender, `ℹ️ *${escapeMarkdown(barber.name)}* ke koi slots available nahi hain.\nLekin *${escapeMarkdown(anyBarber.barberName)}* ke liye slot available hai:\n📅 ${nextDisplay}\n⏰ ${anyBarber.slot.start} – ${anyBarber.slot.end}\n\nKya aap ${escapeMarkdown(anyBarber.barberName)} se book karwana chahenge?\n\n1️⃣ Haan, is barber se book karein\n00: Back\n${M}`);
+          await saveBotState(sender, {
+            step: 'SELECT_SLOT',
+            context: { ...ctx, barberId: anyBarber.barberId, barberName: anyBarber.barberName, selectedDate: anyBarber.date, autoSlots: [anyBarber.slot] }
+          });
+          return;
+        }
+        await sendMessage(sender, `😔 Maafi chahte hain, agle 30 din mein ${escapeMarkdown(barber.name)} ke koi slots available nahi hain. Baad mein dobara try karein.`);
         await showSalonMenu(sendMessage, sender, { id: ctx.salonId, name: ctx.salonName } as any);
         await saveBotState(sender, { step: 'SHOW_SALON_MENU', context: { ...state.context, barberId: undefined, barberName: undefined } });
         return;
       }
       const dateDisplay = today.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' });
+      if (barber.profile_image && sendDocument) {
+        try {
+          let imageUrl = barber.profile_image;
+          if (imageUrl.startsWith('/')) imageUrl = BASE_URL + imageUrl;
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 10000);
+          const response = await fetch(imageUrl, { signal: controller.signal });
+          clearTimeout(timeout);
+          if (response.ok) {
+            const buffer = Buffer.from(await response.arrayBuffer());
+            const ext = imageUrl.split('.').pop() || 'jpg';
+            await sendDocument(sender, buffer, `barber-${barber.id}.${ext}`, `💇 ${escapeMarkdown(barber.name)}`);
+          }
+        } catch {
+          // Image load failed, continue with text
+        }
+      }
       let msg = `💇 *${escapeMarkdown(barber.name)}*\n⭐ Rating: ${barber.rating}/5 (${barber.review_count} reviews)\nExperience: ${barber.experience} years\n\n`;
       if (barber.specialization) msg += `Specialization: ${escapeMarkdown(barber.specialization)}\n\n`;
       msg += `📅 Aaj *${dateDisplay}* ke liye available slots:\n\n${formatSlots(slots)}\n\n00: Back\n${M}`;
@@ -890,10 +1169,13 @@ export async function handleIncomingMessage(
       return;
     }
 
-    if (state.step === 'SELECT_SLOT') {
-      const ctx = state.context;
-      await updateCustomerStatus(sender.replace('@s.whatsapp.net', ''), 'Selecting Slot');
-      const slots = await getAvailableSlots(ctx.barberId, ctx.selectedDate);
+if (state.step === 'SELECT_SLOT') {
+       const ctx = state.context;
+       const slots = ctx.autoSlots || await getAvailableSlots(ctx.barberId, ctx.selectedDate);
+      if (slots.length === 0) {
+        await sendMessage(sender, `❌ Is barber ke liye koi slot available nahi hai.\n\n00: Wapas\n${M}`);
+        return;
+      }
       const idx = parseInt(userInput) - 1;
       if (isNaN(idx) || idx < 0 || idx >= slots.length) {
         await sendMessage(sender, `❌ Invalid choice. Please select a number from 1 to ${slots.length}.`);
@@ -902,7 +1184,10 @@ export async function handleIncomingMessage(
       const slot = slots[idx];
       const dateObj = new Date(ctx.selectedDate);
       const dateDisplay = dateObj.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
-      const token = generateToken();
+      const token = await generateUniqueToken(async (t) => {
+        const existing = await getAppointmentByToken(t);
+        return existing !== null;
+      });
       const priceStr = ctx.servicePrice ? `Rs. ${ctx.servicePrice}` : 'N/A';
       const confirmMsg = `📋 *Confirm Your Booking*\n\n🏪 ${escapeMarkdown(ctx.salonName)}\n💇 ${escapeMarkdown(ctx.barberName)}\n✂️ ${escapeMarkdown(ctx.serviceName)} (${priceStr})\n📅 ${dateDisplay}\n⏰ ${slot.start} – ${slot.end}\n\n🔖 Token: *${token}*`;
       await sendMessage(sender, `${confirmMsg}\n\n1. ✅ Confirm\n00. 🔙 Back\n${M}`);
@@ -913,107 +1198,108 @@ export async function handleIncomingMessage(
       return;
     }
 
-    if (state.step === 'CONFIRM_BOOKING') {
-      const ctx = state.context;
-      await updateCustomerStatus(sender.replace('@s.whatsapp.net', ''), 'Confirming Booking');
-      if (userInput === '1' || userInput === 'CONFIRM_YES') {
-        // Confirm booking
-        const result = await createAppointment({
-          salon_id: ctx.salonId,
-          barber_id: ctx.barberId,
-          customer_phone: sender.replace('@s.whatsapp.net', ''),
-          customer_name: pushName || '',
-          service_id: ctx.serviceId,
-          appointment_date: ctx.selectedDate,
-          appointment_time: ctx.selectedSlot.start,
-          end_time: ctx.selectedSlot.end,
-          token: ctx.token
-        });
-        if (!result.success) {
-          await sendMessage(sender, `❌ Booking confirm nahi ho saki: ${result.error || 'Unknown error'}\n\nPlease dobara try karein.`);
-          await saveBotState(sender, { step: 'IDLE' });
-          return;
-        }
-        // Upsert customer + add loyalty points
-        const price = ctx.servicePrice || 0;
-        const points = Math.floor(price / 10);
-        try {
-          await upsertCustomer(pushName || '', sender.replace('@s.whatsapp.net', ''));
-          await updateCustomerActivity(sender.replace('@s.whatsapp.net', ''));
-          if (points > 0) {
-            await addLoyaltyPoints(sender.replace('@s.whatsapp.net', ''), points);
+if (state.step === 'CONFIRM_BOOKING') {
+       const ctx = state.context;
+       if (userInput === '1' || userInput === 'CONFIRM_YES') {
+         // Confirm booking
+         const result = await createAppointment({
+           salon_id: ctx.salonId,
+           barber_id: ctx.barberId,
+           customer_phone: getCleanPhone(sender),
+           customer_name: pushName || '',
+           service_id: ctx.serviceId,
+           appointment_date: ctx.selectedDate,
+           appointment_time: ctx.selectedSlot.start,
+           end_time: ctx.selectedSlot.end,
+           token: ctx.token
+         });
+if (!result.success) {
+            await sendMessage(sender, `❌ Booking confirm nahi ho saki: ${result.error || 'Slot already booked'}.\nKripya dobara try karein.`);
+            return;
           }
-        } catch (_) { /* non-critical */ }
+         // Upsert customer + add loyalty points
+         const price = ctx.servicePrice || 0;
+         const points = Math.floor(price / BOT_CONFIG.pointsPerPriceDivisor);
+         try {
+           await upsertCustomer(pushName || '', getCleanPhone(sender));
+           await updateCustomerActivity(getCleanPhone(sender));
+           if (points > 0) {
+             await addLoyaltyPoints(getCleanPhone(sender), points);
+           }
+         } catch (_) { /* non-critical */ }
 
-        // Notify salon owner via WhatsApp
-        try {
-          await sendBookingAlert({
-            salon_id: ctx.salonId,
-            salon_name: ctx.salonName,
-            customer_name: pushName || 'Customer',
-            customer_phone: sender.replace('@s.whatsapp.net', ''),
-            service_name: ctx.serviceName,
-            appointment_date: ctx.selectedDate,
-            appointment_time: ctx.selectedSlot.start,
-            token: ctx.token
-          });
-        } catch (_) { /* non-critical */ }
+         // Notify salon owner via WhatsApp
+         try {
+           await sendBookingAlert({
+             salon_id: ctx.salonId,
+             salon_name: ctx.salonName,
+             customer_name: pushName || 'Customer',
+             customer_phone: normalizePhone(sender),
+             service_name: ctx.serviceName,
+             appointment_date: ctx.selectedDate,
+             appointment_time: ctx.selectedSlot.start,
+             token: ctx.token
+           });
+         } catch (_) { /* non-critical */ }
 
-        const dateObj = new Date(ctx.selectedDate);
-        const dateDisplay = dateObj.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
-        const msg = `✅ *Booking Confirmed!* 🎉\n\n🏪 *${escapeMarkdown(ctx.salonName)}*\n💇 Barber: ${escapeMarkdown(ctx.barberName)}\n✂️ Service: ${escapeMarkdown(ctx.serviceName)}\n📅 Date: ${dateDisplay}\n⏰ Time: ${ctx.selectedSlot.start}\n🔖 Token: *${ctx.token}*\n\n📌 *Please note your token number* — aapko salon par ye token dena hoga.\n${points > 0 ? `\n🎉 Aapne ${points} loyalty points earn kiye hain!` : ''}\n\nKuch aur madad? Koi bhi message bhejein nayi booking ke liye.`;
-        await sendMessage(sender, msg);
+         const dateObj = new Date(ctx.selectedDate);
+         const dateDisplay = dateObj.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+         const msg = `✅ *Booking Confirmed!* 🎉\n\n🏪 *${escapeMarkdown(ctx.salonName)}*\n💇 Barber: ${escapeMarkdown(ctx.barberName)}\n✂️ Service: ${escapeMarkdown(ctx.serviceName)}\n📅 Date: ${dateDisplay}\n⏰ Time: ${ctx.selectedSlot.start}\n🔖 Token: *${ctx.token}*\n\n📌 *Please note your token number* — aapko salon par ye token dena hoga.\n${points > 0 ? `\n🎉 Aapne ${points} loyalty points earn kiye hain!` : ''}\n\nKuch aur madad? Koi bhi message bhejein nayi booking ke liye.`;
+         await sendMessage(sender, msg);
 
-        // Generate & send PDF receipt
-        try {
-          let salonAddress: string | undefined;
-          const salonDetail = await getSalonById(ctx.salonId);
-          if (salonDetail) {
-            salonAddress = salonDetail.address;
-          }
-          const receiptData = {
-            receiptId: `RCP-${ctx.token.replace('#', '')}`,
-            salonName: ctx.salonName,
-            salonAddress,
-            salonPhone: salonDetail?.phone,
-            barberName: ctx.barberName,
-            serviceName: ctx.serviceName,
-            servicePrice: ctx.servicePrice,
-            serviceDuration: ctx.serviceDuration,
-            appointmentDate: dateDisplay,
-            appointmentTime: ctx.selectedSlot.start,
-            endTime: ctx.selectedSlot.end,
-            token: ctx.token,
-            customerName: pushName || '',
-            customerPhone: sender.replace('@s.whatsapp.net', ''),
-            status: 'Confirmed'
-          };
-          const pdfBuffer = await generateReceiptPDF(receiptData);
-          if (sendDocument) {
-            await sendDocument(sender, pdfBuffer, `receipt-${ctx.token.replace('#', '')}.pdf`, `📄 Booking Receipt - ${ctx.token}`);
-          }
-        } catch (pdfErr) {
-          console.error('[Bot] PDF receipt error (non-critical):', pdfErr);
-        }
+         // Generate & send PDF receipt
+         try {
+           let salonAddress: string | undefined;
+           const salonDetail = await getSalonById(ctx.salonId);
+           if (salonDetail) {
+             salonAddress = salonDetail.address;
+           }
+           const receiptData = {
+             receiptId: `RCP-${ctx.token.replace('#', '')}`,
+             salonName: ctx.salonName,
+             salonAddress,
+             salonPhone: salonDetail?.phone,
+             barberName: ctx.barberName,
+             serviceName: ctx.serviceName,
+             servicePrice: ctx.servicePrice,
+             serviceDuration: ctx.serviceDuration,
+             appointmentDate: dateDisplay,
+             appointmentTime: ctx.selectedSlot.start,
+             endTime: ctx.selectedSlot.end,
+             token: ctx.token,
+             customerName: pushName || '',
+             customerPhone: getCleanPhone(sender),
+             status: 'Confirmed'
+           };
+           const pdfBuffer = await generateReceiptPDF(receiptData);
+           if (sendDocument) {
+             await sendDocument(sender, pdfBuffer, `receipt-${ctx.token.replace('#', '')}.pdf`, `📄 Booking Receipt - ${ctx.token}`);
+           }
+         } catch (pdfErr) {
+           console.error('[Bot] PDF receipt error (non-critical):', pdfErr);
+         }
 
-        // Ask if they want recurring booking
-        const repeatMsg = `🔁 *Is booking ko repeat karein?*\n\n1. Weekly (har week is din)\n2. Monthly (har month is date)\n00. Nahi, thank you`;
-        await sendMessage(sender, repeatMsg);
-        await saveBotState(sender, {
-          step: 'RECURRING_CHOOSE',
-          context: { ...ctx }
-        });
+         // Ask if they want recurring booking
+         const repeatMsg = `🔁 *Is booking ko repeat karein?*\n\n1. Weekly (har week is din)\n2. Monthly (har month is date)\n00. Nahi, thank you`;
+ await sendMessage(sender, repeatMsg);
+         await saveBotState(sender, {
+           step: 'RECURRING_CHOOSE',
+           context: { ...ctx }
+         });
+         return;
+       }
+        await sendMessage(sender, `❌ Invalid input. Wapas slot select karne ke liye koi bhi message bhejein.`);
+        await saveBotState(sender, { step: 'SELECT_SLOT', context: ctx });
         return;
-      }
-      await sendMessage(sender, `Booking cancel kar di gayi. Koi bhi message bhejein nayi booking ke liye.`);
-      await saveBotState(sender, { step: 'IDLE' });
-      return;
-    }
-
-    // =========== RECURRING BOOKING STATE MACHINE ===========
+     }
 
     if (state.step === 'RECURRING_CHOOSE') {
       const ctx = state.context;
+      if (userInput === '0' || userInput.toUpperCase() === 'CANCEL' || /^(MENU|MAIN\s+MENU)$/i.test(userInput)) {
+        await saveBotState(sender, { step: 'IDLE' });
+        await showMainMenu(sendMessage, sender, pushNameStr);
+        return;
+      }
       if (userInput === '1' || userInput === 'REPEAT_WEEKLY') {
         await sendMessage(sender, `📅 *Which day?*\n\n1 Mon | 2 Tue | 3 Wed | 4 Thu\n5 Fri | 6 Sat | 7 Sun\n\n00: Back`);
         await saveBotState(sender, {
@@ -1030,13 +1316,18 @@ export async function handleIncomingMessage(
         });
         return;
       }
-      await sendMessage(sender, `✅ Done! Koi bhi message bhejein nayi booking ke liye.`);
+      await sendMessage(sender, `❌ Invalid choice. Wapas main menu mein ja rahe hain.\n\nKoi bhi message bhejein nayi booking ke liye.`);
       await saveBotState(sender, { step: 'IDLE' });
       return;
     }
 
     if (state.step === 'RECURRING_DAY') {
       const ctx = state.context;
+      if (userInput === '0' || userInput.toUpperCase() === 'CANCEL' || /^(MENU|MAIN\s+MENU)$/i.test(userInput)) {
+        await saveBotState(sender, { step: 'IDLE' });
+        await showMainMenu(sendMessage, sender, pushNameStr);
+        return;
+      }
       if (userInput === '00') {
         await sendMessage(sender, `Cancel. Koi bhi message bhejein nayi booking ke liye.`);
         await saveBotState(sender, { step: 'IDLE' });
@@ -1052,7 +1343,7 @@ export async function handleIncomingMessage(
         const weeklyRes = await createRecurringBooking({
           salon_id: ctx.salonId,
           barber_id: ctx.barberId,
-          customer_phone: sender.replace('@s.whatsapp.net', ''),
+          customer_phone: getCleanPhone(sender),
           customer_name: pushName || '',
           service_id: ctx.serviceId,
           appointment_time: ctx.selectedSlot.start,
@@ -1073,7 +1364,7 @@ export async function handleIncomingMessage(
         const monthlyRes = await createRecurringBooking({
           salon_id: ctx.salonId,
           barber_id: ctx.barberId,
-          customer_phone: sender.replace('@s.whatsapp.net', ''),
+          customer_phone: getCleanPhone(sender),
           customer_name: pushName || '',
           service_id: ctx.serviceId,
           appointment_time: ctx.selectedSlot.start,
@@ -1092,13 +1383,58 @@ export async function handleIncomingMessage(
       return;
     }
 
+    // =========== GALLERY STATE ===========
+
+    if (state.step === 'GALLERY') {
+      const ctx = state.context;
+      const idx = parseInt(userInput) - 1;
+      if (userInput === '00' || userInput.toUpperCase() === 'BACK') {
+        await showSalonMenu(sendMessage, sender, { id: ctx.salonId, name: ctx.salonName } as any);
+        await saveBotState(sender, { step: 'SHOW_SALON_MENU', context: { countryId: ctx.countryId, cityId: ctx.cityId, areaId: ctx.areaId, salonId: ctx.salonId, salonName: ctx.salonName } });
+        return;
+      }
+      if (!isNaN(idx) && idx >= 0 && idx < ctx.media.length) {
+        const item = ctx.media[idx];
+        if (item.media_url) {
+          let imageUrl = item.media_url;
+          if (imageUrl.startsWith('/')) {
+            imageUrl = BASE_URL + imageUrl;
+          }
+          try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 15000);
+            const response = await fetch(imageUrl, { signal: controller.signal });
+            clearTimeout(timeout);
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            const buffer = Buffer.from(await response.arrayBuffer());
+            const ext = imageUrl.split('.').pop() || 'jpg';
+            const mimeMap: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', pdf: 'application/pdf' };
+            const mimetype = mimeMap[ext.toLowerCase()] || 'image/jpeg';
+            if (sendDocument) {
+              await sendDocument(sender, buffer, `gallery-${item.id}.${ext}`, item.title || 'Salon Image');
+            } else {
+              await sendMessage(sender, `🖼️ ${item.title || 'Salon Image'}\n${imageUrl}`);
+            }
+          } catch {
+            await sendMessage(sender, `❌ Image load nahi ho saki. Baad mein try karein.`);
+          }
+        } else {
+          await sendMessage(sender, `❌ Is image ka URL nahi hai.`);
+        }
+        return;
+      }
+      await sendMessage(sender, `❌ Invalid choice. 1-${ctx.media.length} select karein ya 00: Wapas.`);
+      return;
+    }
+
     // =========== RESCHEDULE STATE MACHINE ===========
 
     if (state.step === 'RESCHEDULE_DATE') {
       const ctx = state.context;
       const idx = parseInt(userInput) - 1;
       if (isNaN(idx) || idx < 0 || idx >= ctx.dates.length) {
-        await sendMessage(sender, `❌ Invalid choice. Select 1-${ctx.dates.length} or 0 to cancel.`);
+        await sendMessage(sender, `❌ Invalid choice. Select 1-${ctx.dates.length} ya 00 cancel.\n\nWapas shuru kar rahe hain.`);
+        await saveBotState(sender, { step: 'IDLE' });
         return;
       }
       const selectedDate = ctx.dates[idx];
@@ -1156,15 +1492,24 @@ export async function handleIncomingMessage(
       return;
     }
 
+// --- Handle SELECT_DATE state (fallback for any edge cases) ---
+    if (state.step === 'SELECT_DATE') {
+      await sendMessage(sender, `📅 *Select Date*\n\nPlease select a date from the options below:\n\n1. Today\n2. Tomorrow\n3. Other dates\n\n00: Back`);
+      return;
+    }
+
     // Fallback for unrecognized state
     await sendMessage(sender, `❌ Something went wrong. Koi bhi message bhejein dobara shuru karne ke liye.`);
     await saveBotState(sender, { step: 'IDLE' });
+     return;
 
-  } catch (err: any) {
+   } catch (err: any) {
     console.error('[Bot Error]', err);
     try {
-      await sendMessage(sender, `❌ Technical error aa gaya hai. Kripya thodi der baad dobara try karein.`);
+      await sendMessage(sender, `❌ Technical error aa gaya hai. Kripya dobara try karein ya MENU type karke wapas jayein.`);
     } catch (_) { /* ignore */ }
+  } finally {
+    release();
   }
 }
 

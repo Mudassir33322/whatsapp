@@ -1,252 +1,191 @@
 import React, { useState } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
-import { 
-  LayoutDashboard, QrCode, Users, Calendar, Zap, 
-  MessageSquare, Settings, DollarSign, LogOut,
-  ChevronRight, Loader2, X, Activity, UserCircle, Moon, Sun
-} from 'lucide-react';
-import { Dashboard } from './pages/Dashboard';
-import { LiveQR } from './pages/LiveQR';
-import { CRM } from './pages/CRM';
-import { Bookings } from './pages/Bookings';
-import { Automations } from './pages/Automations';
-import { Inbox } from './pages/Inbox';
-import { Finances } from './pages/Finances';
-import { Management } from './pages/Management';
-import { Profile } from './pages/Profile';
-import { Login } from './pages/Login';
-import { AuthProvider, useAuth } from './context/AuthContext';
-import { ThemeProvider, useTheme } from './context/ThemeContext';
-import { SocketProvider } from './context/SocketContext';
-import { WhatsAppManager } from './components/WhatsAppManager';
-import { useSocket } from './hooks/useSocket';
-import { ErrorBoundary } from './components/ErrorBoundary';
+import { useNavigate } from 'react-router-dom';
+import { Zap, Lock, Mail, Eye, EyeOff, AlertCircle, Store, Shield, Loader2 } from 'lucide-react';
+import { motion } from 'motion/react';
+import { API_URL } from './config';
+import { ThemeProvider } from './components/ThemeContext';
+import { I18nProvider } from './i18n';
 
-type Page = 'dashboard' | 'qr' | 'crm' | 'bookings' | 'automations' | 'inbox' | 'finances' | 'management' | 'profile';
+export default function App() {
+  const [loginType, setLoginType] = useState<'admin' | 'salon'>('admin');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const navigate = useNavigate();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
-function SocketEventListener({ setToast, setConnected }: { setToast: (toast: { sender: string, text: string } | null) => void, setConnected: (c: boolean) => void }) {
-  const { socket, onMessage } = useSocket();
-  React.useEffect(() => {
-    const unsub = onMessage((data) => {
-      if (!data.fromMe) {
-        setToast({ sender: data.pushName || data.sender, text: data.text });
-        setTimeout(() => setToast(null), 5000);
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    try {
+      const endpoint = loginType === 'admin'
+        ? `${API_URL}/api/admin/auth/login`
+        : `${API_URL}/api/salon/auth/login`;
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (res.status === 429) {
+          const retryAfter = res.headers.get('Retry-After');
+          let retryMsg = 'Too many attempts. Please try again later.';
+          if (retryAfter) {
+            const seconds = parseInt(retryAfter, 10);
+            if (!isNaN(seconds)) {
+              if (seconds >= 60) retryMsg = `Too many attempts. Please try again after ${Math.ceil(seconds / 60)} minute(s).`;
+              else retryMsg = `Too many attempts. Please try again after ${seconds} second(s).`;
+            }
+          }
+          setError(data.error || retryMsg);
+        }
+        else setError(data.error || 'Invalid credentials');
+        setLoading(false);
+        return;
       }
-    });
-    if (socket) {
-      const onConnect = () => setConnected(true);
-      const onDisconnect = () => setConnected(false);
-      socket.on('connect', onConnect);
-      socket.on('disconnect', onDisconnect);
-      setConnected(socket.connected);
-      return () => {
-        if (unsub) unsub();
-        socket.off('connect', onConnect);
-        socket.off('disconnect', onDisconnect);
-      };
+      setLoading(false);
+      if (loginType === 'admin') {
+        localStorage.setItem('admin-token', data.token);
+        localStorage.setItem('admin-user', JSON.stringify(data.admin));
+        navigate('/admin/');
+      } else {
+        localStorage.setItem('salon-token', data.token);
+        localStorage.setItem('salon-user', JSON.stringify(data.salon));
+        navigate('/salon/');
+      }
+    } catch {
+      setError('Network error. Could not connect to server.');
+      setLoading(false);
     }
-    return () => { if (unsub) unsub(); };
-  }, [socket, onMessage, setToast, setConnected]);
-  return null;
-}
-
-function AppContent() {
-  const { user, loading, logout } = useAuth();
-  const { theme, toggleTheme } = useTheme();
-  const [activePage, setActivePage] = useState<Page>('dashboard');
-  const [toast, setToast] = useState<{ sender: string, text: string } | null>(null);
-  const [waStatus, setWaStatus] = useState({ connected: false, loading: true });
-  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
-
-  if (loading) {
-    return (
-      <div className="h-screen bg-slate-50 flex items-center justify-center">
-        <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
-      </div>
-    );
-  }
-
-  if (!user) return <Login />;
-
-  const navItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'crm', label: 'CRM Automation', icon: Users },
-    { id: 'bookings', label: 'Booking System', icon: Calendar },
-    { id: 'automations', label: 'Workflows', icon: Zap },
-    { id: 'inbox', label: 'Live Inbox', icon: MessageSquare },
-    { id: 'finances', label: 'Finances & Stock', icon: DollarSign },
-    { id: 'management', label: 'Management', icon: Settings },
-  ];
-
-  const avatarInitials = user.avatarInitials || user.displayName?.split(' ').map(n => n[0]).join('') || 'AU';
+  };
 
   return (
-    <SocketProvider sessionId={user.uid}>
-      <SocketEventListener setToast={setToast} setConnected={(c) => setWaStatus({ connected: c, loading: false })} />
-      <div className={`flex h-screen ${theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-[#F9FAFB] text-slate-900'} font-sans`}>
-        <WhatsAppManager />
-        {/* ... rest of the component ... */}
-
-      {/* Sidebar */}
-      <aside className={`w-64 border-r flex flex-col ${theme === 'dark' ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
-        <div className="p-6 flex items-center gap-3">
-          <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white">
-            <Zap className="w-6 h-6 fill-current" />
-          </div>
-          <h1 className="text-xl font-bold tracking-tight">AutoZap <span className="text-indigo-600">Enterprise</span></h1>
+    <I18nProvider>
+    <ThemeProvider>
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 flex items-center justify-center p-4">
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="w-full max-w-md"
+      >
+        {/* Logo */}
+        <div className="text-center mb-8">
+          <motion.div
+            initial={{ scale: 0 }}
+            animate={{ scale: 1 }}
+            transition={{ type: 'spring', stiffness: 200, damping: 15 }}
+            className="inline-flex items-center justify-center w-16 h-16 bg-indigo-600 rounded-2xl shadow-lg shadow-indigo-500/25 mb-4"
+          >
+            <Zap className="w-8 h-8 text-white fill-current" />
+          </motion.div>
+          <h1 className="text-3xl font-bold text-white tracking-tight">AutoZap</h1>
+          <p className="text-slate-400 text-sm mt-1">Sign in to your account</p>
         </div>
 
-        <nav className="flex-1 px-4 space-y-1 overflow-y-auto">
-          {navItems.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => setActivePage(item.id as Page)}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-                activePage === item.id
-                  ? (theme === 'dark' ? 'bg-indigo-600/30 text-indigo-400 shadow-sm' : 'bg-indigo-50 text-indigo-700 shadow-sm')
-                  : `${theme === 'dark' ? 'text-slate-400 hover:bg-slate-700 hover:text-white' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-900'}`
+        {/* Card */}
+        <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-8 shadow-2xl">
+          {/* Tabs */}
+          <div className="flex bg-slate-800/50 rounded-xl p-1 mb-6">
+            <button type="button"
+              onClick={() => { setLoginType('admin'); setError(''); }}
+              className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold transition-all ${
+                loginType === 'admin'
+                  ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/25'
+                  : 'text-slate-400 hover:text-white'
               }`}
             >
-              <item.icon className="w-5 h-5" />
-              <span className="font-medium text-sm">{item.label}</span>
-              {activePage === item.id && (
-                <motion.div layoutId="nav-pill" className="ml-auto w-1.5 h-1.5 rounded-full bg-indigo-600" />
-              )}
+              <Shield className="w-4 h-4" />
+              Admin Access
             </button>
-          ))}
-        </nav>
-
-        {/* Profile Area */}
-        <div className={`p-4 border-t ${theme === 'dark' ? 'border-slate-700' : 'border-slate-100'}`}>
-          <div className="relative">
-            <button
-              onClick={() => setProfileMenuOpen(o => !o)}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${theme === 'dark' ? 'bg-slate-700 hover:bg-slate-600 text-white' : 'bg-slate-900 hover:bg-slate-800 text-white'}`}
+            <button type="button"
+              onClick={() => { setLoginType('salon'); setError(''); }}
+              className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold transition-all ${
+                loginType === 'salon'
+                  ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/25'
+                  : 'text-slate-400 hover:text-white'
+              }`}
             >
-              <div className="w-8 h-8 rounded-full bg-indigo-500 flex items-center justify-center text-xs font-bold ring-2 ring-indigo-500/20">
-                {avatarInitials}
-              </div>
-              <div className="flex-1 overflow-hidden text-left">
-                <p className="text-xs font-semibold truncate">{user.displayName}</p>
-                <p className="text-[10px] text-slate-400 truncate uppercase tracking-wide">{user.role || 'Admin'}</p>
-              </div>
-              <Activity className="w-3 h-3 text-emerald-400 animate-pulse" />
+              <Store className="w-4 h-4" />
+              Salon Access
             </button>
-
-            {/* Profile Dropdown */}
-            <AnimatePresence>
-              {profileMenuOpen && (
-                <motion.div
-                  initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                  className={`absolute bottom-full left-0 right-0 mb-2 rounded-2xl border shadow-xl overflow-hidden ${theme === 'dark' ? 'bg-slate-700 border-slate-600' : 'bg-white border-slate-100'}`}
-                >
-                  <button
-                    onClick={() => { setActivePage('profile'); setProfileMenuOpen(false); }}
-                    className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-semibold transition-colors ${theme === 'dark' ? 'text-slate-200 hover:bg-slate-600' : 'text-slate-700 hover:bg-slate-50'}`}
-                  >
-                    <UserCircle className="w-4 h-4 text-indigo-500" />
-                    Profile & Settings
-                  </button>
-                  <button
-                    onClick={toggleTheme}
-                    className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-semibold transition-colors ${theme === 'dark' ? 'text-slate-200 hover:bg-slate-600' : 'text-slate-700 hover:bg-slate-50'}`}
-                  >
-                    {theme === 'dark' ? <Sun className="w-4 h-4 text-yellow-500" /> : <Moon className="w-4 h-4 text-indigo-500" />}
-                    {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
-                  </button>
-                  <div className={`h-px ${theme === 'dark' ? 'bg-slate-600' : 'bg-slate-100'}`} />
-                  <button
-                    onClick={() => { logout(); setProfileMenuOpen(false); }}
-                    className="w-full flex items-center gap-3 px-4 py-3 text-sm font-semibold text-rose-500 hover:bg-rose-50 transition-colors"
-                  >
-                    <LogOut className="w-4 h-4" />
-                    Sign Out
-                  </button>
-                </motion.div>
-              )}
-            </AnimatePresence>
           </div>
-        </div>
-      </aside>
 
-      {/* Main Content */}
-      <main className="flex-1 overflow-y-auto">
-        <header className={`h-16 border-b flex items-center justify-between px-8 sticky top-0 z-10 ${theme === 'dark' ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
-          <div className="flex items-center gap-2 text-slate-400">
-            <span className="text-sm">AutoZap</span>
-            <ChevronRight className="w-4 h-4" />
-            <span className={`text-sm font-medium capitalize ${theme === 'dark' ? 'text-white' : 'text-slate-900'}`}>
-              {activePage.replace('-', ' ')}
-            </span>
-          </div>
-          <div className="flex items-center gap-4">
-            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold border ${waStatus.connected ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-rose-50 text-rose-700 border-rose-100'}`}>
-              <div className={`w-1.5 h-1.5 rounded-full ${waStatus.connected ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`} />
-              {waStatus.loading ? 'Syncing...' : waStatus.connected ? 'WhatsApp Connected' : 'WhatsApp Disconnected'}
+          {/* Form */}
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-slate-300 mb-1.5">Email Address</label>
+              <div className="relative">
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <input
+                  type="email"
+                  value={email}
+                  onChange={e => setEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  required
+                  className="w-full pl-10 pr-4 py-2.5 bg-slate-800/50 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all text-sm"
+                />
+              </div>
             </div>
-          </div>
-        </header>
 
-        {/* Toast */}
-        <AnimatePresence>
-          {toast && (
-            <motion.div
-              initial={{ opacity: 0, y: -50, scale: 0.9 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -20, scale: 0.9 }}
-              className="fixed top-20 right-8 z-50 bg-white border border-slate-200 p-4 rounded-2xl shadow-2xl shadow-indigo-100/50 flex items-start gap-4 max-w-sm cursor-pointer"
-              onClick={() => { setActivePage('inbox'); setToast(null); }}
-            >
-              <div className="w-10 h-10 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center shrink-0">
-                <MessageSquare className="w-5 h-5" />
+            <div>
+              <label className="block text-sm font-medium text-slate-300 mb-1.5">Password</label>
+              <div className="relative">
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  required
+                  autoComplete="current-password"
+                  className="w-full pl-10 pr-10 py-2.5 bg-slate-800/50 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-300 transition-colors"
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
               </div>
-              <div className="flex-1 min-w-0">
-                <h4 className="text-sm font-bold text-slate-900 truncate">New: {toast.sender}</h4>
-                <p className="text-xs text-slate-500 truncate mt-0.5">{toast.text}</p>
-              </div>
-              <button onClick={e => { e.stopPropagation(); setToast(null); }} className="p-1 text-slate-400 hover:text-slate-600 rounded-lg">
-                <X className="w-4 h-4" />
-              </button>
-            </motion.div>
-          )}
-        </AnimatePresence>
+            </div>
 
-        <div className="p-8">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={activePage}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              transition={{ duration: 0.2 }}
+            {error && (
+              <motion.div
+                initial={{ opacity: 0, y: -5 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="flex items-start gap-2 bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-3"
+              >
+                <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
+                <p className="text-sm text-red-300">{error}</p>
+              </motion.div>
+            )}
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-600/50 text-white rounded-lg font-semibold text-sm transition-all shadow-lg shadow-indigo-500/25"
             >
-              {activePage === 'dashboard' && <Dashboard />}
-              {activePage === 'qr' && <LiveQR />}
-              {activePage === 'crm' && <CRM />}
-              {activePage === 'bookings' && <Bookings />}
-              {activePage === 'automations' && <Automations />}
-              {activePage === 'inbox' && <Inbox />}
-              {activePage === 'finances' && <Finances />}
-              {activePage === 'management' && <Management />}
-              {activePage === 'profile' && <Profile />}
-            </motion.div>
-          </AnimatePresence>
-          </div>
-          </main>
-          </div>
-          </SocketProvider>
-          );
-          }
-export default function App() {
-  return (
-    <ErrorBoundary>
-      <AuthProvider>
-        <ThemeProvider>
-          <AppContent />
-        </ThemeProvider>
-      </AuthProvider>
-    </ErrorBoundary>
+              {loading ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Signing in...
+                </>
+              ) : (
+                <>
+                  <Lock className="w-4 h-4" />
+                  Sign In
+                </>
+              )}
+            </button>
+          </form>
+        </div>
+      </motion.div>
+    </div>
+    </ThemeProvider>
+    </I18nProvider>
   );
 }

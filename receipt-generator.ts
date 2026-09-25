@@ -40,7 +40,7 @@ export function generateReceiptPDF(data: ReceiptData): Promise<Buffer> {
 
     function centerText(text: string, y: number, size: number = 10, bold: boolean = false) {
       const width = doc.widthOfString(text);
-      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica', size).text(text, centerX - width / 2, y);
+      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(size).text(text, centerX - width / 2, y);
     }
 
     function divider(y: number) {
@@ -48,6 +48,8 @@ export function generateReceiptPDF(data: ReceiptData): Promise<Buffer> {
     }
 
     let y = 20;
+
+    const safe = (v: any, fallback = '') => v ?? fallback;
 
     centerText('SALONLINK', y, 18, true);
     y += 22;
@@ -62,9 +64,9 @@ export function generateReceiptPDF(data: ReceiptData): Promise<Buffer> {
 
     doc.fillColor('#333333');
 
-    doc.font('Helvetica-Bold', 9).text('SALON', 15, y);
+    doc.font('Helvetica-Bold').fontSize(9).text('SALON', 15, y);
     y += 11;
-    doc.font('Helvetica', 9).text(data.salonName, 15, y);
+    doc.font('Helvetica').fontSize(9).text(safe(data.salonName, 'N/A'), 15, y);
     y += 10;
     if (data.salonAddress) {
       doc.fontSize(8).fillColor('#666666').text(data.salonAddress, 15, y);
@@ -79,21 +81,21 @@ export function generateReceiptPDF(data: ReceiptData): Promise<Buffer> {
     divider(y);
     y += 10;
 
-    doc.fillColor('#333333').font('Helvetica-Bold', 9).text('APPOINTMENT DETAILS', 15, y);
+    doc.fillColor('#333333').font('Helvetica-Bold').fontSize(9).text('APPOINTMENT DETAILS', 15, y);
     y += 14;
 
     const labelX = 15;
     const valueX = 95;
     const rowH = 11;
 
-    function row(label: string, value: string) {
-      doc.font('Helvetica', 8).fillColor('#999999').text(label, labelX, y);
-      doc.font('Helvetica-Bold', 9).fillColor('#333333').text(value, valueX, y);
-      y += rowH;
-    }
+function row(label: string, value: string) {
+       doc.font('Helvetica').fontSize(8).fillColor('#999999').text(label, labelX, y);
+       doc.font('Helvetica-Bold').fontSize(9).fillColor('#333333').text(safe(value, 'N/A'), valueX, y);
+       y += rowH;
+     }
 
-    row('Barber:', data.barberName);
-    row('Service:', data.serviceName);
+    row('Barber:', safe(data.barberName, 'N/A'));
+    row('Service:', safe(data.serviceName, 'N/A'));
 
     if (data.serviceDuration) {
       row('Duration:', `${data.serviceDuration} min`);
@@ -102,19 +104,19 @@ export function generateReceiptPDF(data: ReceiptData): Promise<Buffer> {
       row('Price:', `Rs. ${data.servicePrice.toLocaleString()}`);
     }
 
-    row('Date:', data.appointmentDate);
+    row('Date:', safe(data.appointmentDate, 'N/A'));
     const timeStr = data.endTime
-      ? `${data.appointmentTime} - ${data.endTime}`
-      : data.appointmentTime;
+      ? `${safe(data.appointmentTime)} - ${safe(data.endTime)}`
+      : safe(data.appointmentTime, 'N/A');
     row('Time:', timeStr);
 
     y += 4;
 
-    doc.font('Helvetica-Bold', 11).fillColor('#333333');
+    doc.font('Helvetica-Bold').fontSize(11).fillColor('#333333');
     const tokenLabel = 'Token:';
-    doc.font('Helvetica', 8).fillColor('#999999').text(tokenLabel, labelX, y);
-    doc.font('Helvetica-Bold', 14).fillColor('#7c3aed');
-    const tokenText = `  ${data.token}`;
+    doc.font('Helvetica').fontSize(8).fillColor('#999999').text(tokenLabel, labelX, y);
+    doc.font('Helvetica-Bold').fontSize(14).fillColor('#7c3aed');
+    const tokenText = `  ${safe(data.token, 'N/A')}`;
     doc.text(tokenText, labelX + doc.widthOfString(tokenLabel) + 2, y - 2);
     y += 22;
 
@@ -130,7 +132,7 @@ export function generateReceiptPDF(data: ReceiptData): Promise<Buffer> {
     divider(y);
     y += 10;
 
-    doc.fillColor('#999999').font('Helvetica', 7);
+    doc.fillColor('#999999').font('Helvetica').fontSize(7);
     centerText('Thank you for choosing us!', y, 7);
     y += 9;
     centerText('Please show this receipt at the salon.', y, 7);

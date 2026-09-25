@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { API_URL } from '../config';
 
 interface SalonUser {
   id: number;
@@ -14,7 +15,7 @@ interface SalonAuthContextType {
   salon: SalonUser | null;
   token: string | null;
   loading: boolean;
-  login: (email: string, password: string) => Promise<boolean>;
+  login: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
   logout: () => void;
 }
 
@@ -26,31 +27,51 @@ export function SalonAuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    const ac = new AbortController();
     const savedToken = localStorage.getItem('salon-token');
     const savedSalon = localStorage.getItem('salon-user');
     if (savedToken && savedSalon) {
       setToken(savedToken);
-      setSalon(JSON.parse(savedSalon));
+      try { setSalon(JSON.parse(savedSalon)); } catch { localStorage.removeItem('salon-user'); }
+      fetch(`${API_URL}/api/salon/auth/me`, {
+        headers: { Authorization: `Bearer ${savedToken}` },
+        signal: ac.signal,
+      }).then(res => {
+        if (res.status === 401) {
+          localStorage.removeItem('salon-token');
+          localStorage.removeItem('salon-user');
+          setToken(null);
+          setSalon(null);
+        }
+        setLoading(false);
+      }).catch(() => {
+        setLoading(false);
+      });
+    } else {
+      setLoading(false);
     }
-    setLoading(false);
+    return () => ac.abort();
   }, []);
 
-  const login = async (email: string, password: string): Promise<boolean> => {
+  const login = async (email: string, password: string): Promise<{ ok: boolean; error?: string }> => {
     try {
-      const res = await fetch('/api/salon/auth/login', {
+      const res = await fetch(`${API_URL}/api/salon/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password })
       });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({} as any));
+        return { ok: false, error: res.status === 401 ? 'Invalid email or password' : (data.error || 'Login failed. Please try again.') };
+      }
       const data = await res.json();
-      if (!res.ok) return false;
       localStorage.setItem('salon-token', data.token);
       localStorage.setItem('salon-user', JSON.stringify(data.salon));
       setToken(data.token);
       setSalon(data.salon);
-      return true;
+      return { ok: true };
     } catch {
-      return false;
+      return { ok: false, error: 'Network error — please check your connection and try again.' };
     }
   };
 
@@ -69,5 +90,7 @@ export function SalonAuthProvider({ children }: { children: React.ReactNode }) {
 }
 
 export function useSalonAuth() {
-  return useContext(SalonAuthContext);
+  const ctx = useContext(SalonAuthContext);
+  if (!ctx) throw new Error('useSalonAuth must be used within SalonAuthProvider');
+  return ctx;
 }

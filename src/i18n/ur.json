@@ -1,0 +1,43 @@
+{
+  "nav": {
+    "dashboard": "ڈیش بورڈ",
+    "inbox": "ان باکس",
+    "locations": "مقامات",
+    "salons": "سیلون",
+    "admins": "ایڈمن",
+    "appointments": "اپائنٹمنٹس",
+    "customers": "گاہک",
+    "crm": "سی آر ایم",
+    "calendar": "کیلنڈر",
+    "finances": "مالیات",
+    "inventory": "انوینٹری",
+    "audit": "آڈٹ لاگ",
+    "qr": "لائیو کیو آر",
+    "sessions": "سیشنز",
+    "settings": "ترتیبات"
+  },
+  "common": {
+    "search": "نام، فون سے تلاش کریں...",
+    "export": "ایکسپورٹ",
+    "signOut": "سائن آؤٹ",
+    "save": "محفوظ کریں",
+    "cancel": "منسوخ کریں",
+    "delete": "حذف کریں",
+    "edit": "ترمیم",
+    "filter": "فلٹر",
+    "all": "سب",
+    "customers": "گاہک",
+    "salons": "سیلون",
+    "admins": "ایڈمن"
+  },
+  "dashboard": {
+    "overview": "جائزہ",
+    "revenue": "آمدنی",
+    "appointments": "اپائنٹمنٹس",
+    "trend": "بکنگ ٹرینڈ",
+    "topSalons": "ٹاپ سیلون",
+    "topBarbers": "ٹاپ باربر",
+    "salonPerf": "سیلون کارکردگی (بکنگز)",
+    "recentActivity": "حالیہ سرگرمی"
+  }
+}

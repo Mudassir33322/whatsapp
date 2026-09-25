@@ -1,5 +1,0 @@
-◇ injected env (13) from .env // tip: ⌁ auth for agents [www.vestauth.com]
-🚀 Platform Server running on http://localhost:3000
-[Notifications] Scheduler started
-[Recurring] Scheduler started (runs every 30 minutes)
-[WhatsApp] Session autozap-admin CONNECTED

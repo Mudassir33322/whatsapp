@@ -1,13 +1,15 @@
 import { useState, useEffect } from 'react';
-import { Flag, MapPin, Plus, Pencil, Trash2, X, Loader2 } from 'lucide-react';
+import { Flag, MapPin, Plus, Pencil, Search, Trash2, X, Loader2 } from 'lucide-react';
+import { useAdminAuth } from './AdminAuthContext';
+import { useConfirm } from '../hooks/useConfirm';
 
 interface Country { id: number; name: string; phone_code: string; is_active: number; }
 interface City { id: number; country_id: number; name: string; is_active: number; }
 interface Area { id: number; city_id: number; name: string; is_active: number; }
 
-const hd = () => ({ 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('admin-token')}` });
-
 export function AdminLocations() {
+  const { adminFetch } = useAdminAuth();
+  const { confirm, confirmDialog } = useConfirm();
   const [countries, setCountries] = useState<Country[]>([]);
   const [cities, setCities] = useState<City[]>([]);
   const [areas, setAreas] = useState<Area[]>([]);
@@ -15,8 +17,12 @@ export function AdminLocations() {
   const [aid, setAid] = useState<number | null>(null);
   const [load, setLoad] = useState({ c: true, ct: false, a: false });
   const [err, setErr] = useState('');
+  const [saving, setSaving] = useState(false);
   const [modal, setModal] = useState<{ t: string; m: string; d?: any } | null>(null);
   const [form, setForm] = useState({ name: '', phone_code: '', is_active: true });
+  const [countrySearch, setCountrySearch] = useState('');
+  const [citySearch, setCitySearch] = useState('');
+  const [areaSearch, setAreaSearch] = useState('');
 
   useEffect(() => {
     if (!modal) return;
@@ -24,9 +30,10 @@ export function AdminLocations() {
   }, [modal]);
 
   useEffect(() => {
+    const ac = new AbortController();
     (async () => {
       try {
-        const res = await fetch('/api/admin/locations/countries', { headers: hd() });
+        const res = await adminFetch('/api/admin/locations/countries', { signal: ac.signal });
         if (!res.ok) throw new Error('Failed to load countries');
         const data = await res.json();
         setCountries(data);
@@ -34,36 +41,42 @@ export function AdminLocations() {
       } catch (e: any) { setErr(e.message); }
       finally { setLoad(p => ({ ...p, c: false })); }
     })();
+    return () => ac.abort();
   }, []);
 
   useEffect(() => {
+    const ac = new AbortController();
     setAid(null);
-    if (!cid) { setCities([]); return; }
+    if (!cid) { setCities([]); return () => ac.abort(); }
     (async () => {
       try {
         setLoad(p => ({ ...p, ct: true }));
-        const res = await fetch(`/api/admin/locations/cities/${cid}`, { headers: hd() });
+        const res = await adminFetch(`/api/admin/locations/cities/${cid}`, { signal: ac.signal });
         if (!res.ok) throw new Error('Failed to load cities');
         setCities(await res.json());
       } catch (e: any) { setErr(e.message); }
       finally { setLoad(p => ({ ...p, ct: false })); }
     })();
+    return () => ac.abort();
   }, [cid]);
 
   useEffect(() => {
-    if (!aid) { setAreas([]); return; }
+    const ac = new AbortController();
+    if (!aid) { setAreas([]); return () => ac.abort(); }
     (async () => {
       try {
         setLoad(p => ({ ...p, a: true }));
-        const res = await fetch(`/api/admin/locations/areas/${aid}`, { headers: hd() });
+        const res = await adminFetch(`/api/admin/locations/areas/${aid}`, { signal: ac.signal });
         if (!res.ok) throw new Error('Failed to load areas');
         setAreas(await res.json());
       } catch (e: any) { setErr(e.message); }
       finally { setLoad(p => ({ ...p, a: false })); }
     })();
+    return () => ac.abort();
   }, [aid]);
 
   const save = async () => {
+    setSaving(true);
     setErr('');
     if (!modal) return;
     const { t: type, m: mode, d: data } = modal;
@@ -75,7 +88,7 @@ export function AdminLocations() {
     const pm: Record<string, string> = { country: 'countries', city: 'cities', area: 'areas' };
     const url = edit ? `/api/admin/locations/${pm[type]}/${data.id}` : `/api/admin/locations/${pm[type]}`;
     try {
-      const res = await fetch(url, { method: edit ? 'PUT' : 'POST', headers: hd(), body: JSON.stringify(body) });
+      const res = await adminFetch(url, { method: edit ? 'PUT' : 'POST', body: JSON.stringify(body) });
       if (!res.ok) { const e = await res.json().catch(() => ({ error: 'Failed to save' })); throw new Error(e.error || 'Failed to save'); }
       const s = await res.json();
       if (type === 'country') setCountries((prev: Country[]) => edit ? prev.map(x => x.id === data.id ? s : x) : [...prev, s]);
@@ -83,14 +96,16 @@ export function AdminLocations() {
       else setAreas((prev: Area[]) => edit ? prev.map(x => x.id === data.id ? s : x) : [...prev, s]);
       setModal(null);
     } catch (e: any) { setErr(e.message); }
+    finally { setSaving(false); }
   };
 
   const del = async (type: string, id: number) => {
     setErr('');
-    if (!window.confirm('Delete this item?')) return;
+    const confirmed = await confirm('Delete Location', `Are you sure you want to delete this ${type}? This action cannot be undone.`, 'Delete');
+    if (!confirmed) return;
     const pm: Record<string, string> = { country: 'countries', city: 'cities', area: 'areas' };
     try {
-      const res = await fetch(`/api/admin/locations/${pm[type]}/${id}`, { method: 'DELETE', headers: hd() });
+      const res = await adminFetch(`/api/admin/locations/${pm[type]}/${id}`, { method: 'DELETE' });
       if (!res.ok) { const e = await res.json().catch(() => ({ error: 'Failed to delete' })); throw new Error(e.error || 'Failed to delete'); }
       const f = (prev: any[]) => prev.filter(x => x.id !== id);
       if (type === 'country') setCountries(f);
@@ -99,8 +114,37 @@ export function AdminLocations() {
     } catch (e: any) { setErr(e.message); }
   };
 
+  const filteredCountries = countrySearch ? countries.filter(c => c.name.toLowerCase().includes(countrySearch.toLowerCase())) : countries;
+  const filteredCities = citySearch ? cities.filter(c => c.name.toLowerCase().includes(citySearch.toLowerCase())) : cities;
+  const filteredAreas = areaSearch ? areas.filter(a => a.name.toLowerCase().includes(areaSearch.toLowerCase())) : areas;
+
   if (load.c) {
-    return <div className="flex items-center justify-center min-h-[60vh]"><Loader2 className="w-8 h-8 animate-spin text-indigo-400" /></div>;
+    return (
+      <div className="space-y-6">
+        <div className="animate-pulse">
+          <div className="h-8 bg-slate-700/50 rounded-lg w-36 mb-2" />
+          <div className="h-4 bg-slate-700/50 rounded w-52" />
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <div key={i} className="bg-slate-800 rounded-2xl border border-slate-700 overflow-hidden animate-pulse">
+              <div className="px-5 py-4 border-b border-slate-700">
+                <div className="h-4 bg-slate-700 rounded w-24" />
+              </div>
+              <div className="space-y-2 p-2">
+                {Array.from({ length: 4 }).map((_, j) => (
+                  <div key={j} className="flex items-center gap-3 px-4 py-3">
+                    <div className="h-4 bg-slate-700 rounded w-24" />
+                    <div className="h-4 bg-slate-700 rounded w-10" />
+                    <div className="h-5 bg-slate-700 rounded w-14 ml-auto" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
   }
 
   const Bdg = ({ a }: { a: number }) => (
@@ -109,8 +153,8 @@ export function AdminLocations() {
 
   const Act = ({ t, d }: { t: string; d: any }) => (
     <div className="flex items-center gap-1">
-      <button onClick={() => setModal({ t, m: 'edit', d })} className="p-1.5 hover:bg-slate-600 rounded-lg transition-colors text-slate-400 hover:text-indigo-400"><Pencil className="w-3.5 h-3.5" /></button>
-      <button onClick={() => del(t, d.id)} className="p-1.5 hover:bg-slate-600 rounded-lg transition-colors text-slate-400 hover:text-rose-400"><Trash2 className="w-3.5 h-3.5" /></button>
+      <button type="button" onClick={() => setModal({ t, m: 'edit', d })} className="p-1.5 hover:bg-slate-600 rounded-lg transition-colors text-slate-400 hover:text-indigo-400"><Pencil className="w-3.5 h-3.5" /></button>
+      <button type="button" onClick={() => del(t, d.id)} className="p-1.5 hover:bg-slate-600 rounded-lg transition-colors text-slate-400 hover:text-rose-400"><Trash2 className="w-3.5 h-3.5" /></button>
     </div>
   );
 
@@ -130,20 +174,27 @@ export function AdminLocations() {
       {err && (
         <div className="flex items-center justify-between bg-rose-500/10 text-rose-400 px-4 py-3 rounded-xl border border-rose-500/20 text-sm">
           <span>{err}</span>
-          <button onClick={() => setErr('')} className="p-1 hover:bg-rose-500/20 rounded-lg"><X className="w-4 h-4" /></button>
+          <button type="button" onClick={() => setErr('')} className="p-1 hover:bg-rose-500/20 rounded-lg"><X className="w-4 h-4" /></button>
         </div>
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <Pnl title="Countries" icon={Flag}>
           <div className="p-4 border-b border-slate-700">
-            <button onClick={() => setModal({ t: 'country', m: 'add' })} className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-medium transition-colors"><Plus className="w-4 h-4" /> Add Country</button>
+            <button type="button" onClick={() => setModal({ t: 'country', m: 'add' })} className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-medium transition-colors"><Plus className="w-4 h-4" /> Add Country</button>
           </div>
+          <div className="px-4 pb-3">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <input type="text" placeholder="Search countries..." value={countrySearch} onChange={e => setCountrySearch(e.target.value)} className="w-full bg-slate-700 border border-slate-600 rounded-xl pl-9 pr-4 py-2 text-white text-sm placeholder-slate-400 focus:outline-none focus:border-indigo-500" />
+            </div>
+          </div>
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead><tr className="bg-slate-700/50 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider"><th className="px-4 py-2.5">Name</th><th className="px-4 py-2.5">Code</th><th className="px-4 py-2.5">Status</th><th className="px-4 py-2.5"></th></tr></thead>
             <tbody className="divide-y divide-slate-700">
-              {countries.length === 0 ? <tr><td colSpan={4} className="px-4 py-12 text-center text-slate-500 text-sm">No countries</td></tr>
-              : countries.map(c => (
+              {filteredCountries.length === 0 ? <tr><td colSpan={4} className="px-4 py-12 text-center text-slate-500 text-sm">No countries</td></tr>
+              : filteredCountries.map(c => (
                 <tr key={c.id} onClick={() => setCid(prev => prev === c.id ? null : c.id)} className={`cursor-pointer transition-colors ${cid === c.id ? 'bg-indigo-600/10' : 'hover:bg-slate-700/30'}`}>
                   <td className="px-4 py-3 font-medium text-white whitespace-nowrap">{c.name}</td>
                   <td className="px-4 py-3 text-slate-300">{c.phone_code}</td>
@@ -153,18 +204,26 @@ export function AdminLocations() {
               ))}
             </tbody>
           </table>
+          </div>
         </Pnl>
 
         <Pnl title="Cities" icon={MapPin}>
           <div className="p-4 border-b border-slate-700">
-            <button onClick={() => cid && setModal({ t: 'city', m: 'add' })} disabled={!cid} className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-600 disabled:cursor-not-allowed text-white rounded-xl text-sm font-medium transition-colors"><Plus className="w-4 h-4" /> Add City</button>
+            <button type="button" onClick={() => cid && setModal({ t: 'city', m: 'add' })} disabled={!cid} className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-600 disabled:cursor-not-allowed text-white rounded-xl text-sm font-medium transition-colors"><Plus className="w-4 h-4" /> Add City</button>
           </div>
+          <div className="px-4 pb-3">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <input type="text" placeholder="Search cities..." value={citySearch} onChange={e => setCitySearch(e.target.value)} className="w-full bg-slate-700 border border-slate-600 rounded-xl pl-9 pr-4 py-2 text-white text-sm placeholder-slate-400 focus:outline-none focus:border-indigo-500" />
+            </div>
+          </div>
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead><tr className="bg-slate-700/50 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider"><th className="px-4 py-2.5">Name</th><th className="px-4 py-2.5">Status</th><th className="px-4 py-2.5"></th></tr></thead>
             <tbody className="divide-y divide-slate-700">
               {load.ct ? <tr><td colSpan={3} className="px-4 py-12 text-center"><Loader2 className="w-5 h-5 animate-spin text-indigo-400 mx-auto" /></td></tr>
-              : cities.length === 0 ? <tr><td colSpan={3} className="px-4 py-12 text-center text-slate-500 text-sm">{cid ? 'No cities' : 'Select a country'}</td></tr>
-              : cities.map(c => (
+              : filteredCities.length === 0 ? <tr><td colSpan={3} className="px-4 py-12 text-center text-slate-500 text-sm">{cid ? 'No cities' : 'Select a country'}</td></tr>
+              : filteredCities.map(c => (
                 <tr key={c.id} onClick={() => setAid(prev => prev === c.id ? null : c.id)} className={`cursor-pointer transition-colors ${aid === c.id ? 'bg-indigo-600/10' : 'hover:bg-slate-700/30'}`}>
                   <td className="px-4 py-3 font-medium text-white whitespace-nowrap">{c.name}</td>
                   <td className="px-4 py-3"><Bdg a={c.is_active} /></td>
@@ -173,18 +232,26 @@ export function AdminLocations() {
               ))}
             </tbody>
           </table>
+          </div>
         </Pnl>
 
         <Pnl title="Areas" icon={MapPin}>
           <div className="p-4 border-b border-slate-700">
-            <button onClick={() => aid && setModal({ t: 'area', m: 'add' })} disabled={!aid} className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-600 disabled:cursor-not-allowed text-white rounded-xl text-sm font-medium transition-colors"><Plus className="w-4 h-4" /> Add Area</button>
+            <button type="button" onClick={() => aid && setModal({ t: 'area', m: 'add' })} disabled={!aid} className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-600 disabled:cursor-not-allowed text-white rounded-xl text-sm font-medium transition-colors"><Plus className="w-4 h-4" /> Add Area</button>
           </div>
+          <div className="px-4 pb-3">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <input type="text" placeholder="Search areas..." value={areaSearch} onChange={e => setAreaSearch(e.target.value)} className="w-full bg-slate-700 border border-slate-600 rounded-xl pl-9 pr-4 py-2 text-white text-sm placeholder-slate-400 focus:outline-none focus:border-indigo-500" />
+            </div>
+          </div>
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead><tr className="bg-slate-700/50 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider"><th className="px-4 py-2.5">Name</th><th className="px-4 py-2.5">Status</th><th className="px-4 py-2.5"></th></tr></thead>
             <tbody className="divide-y divide-slate-700">
               {load.a ? <tr><td colSpan={3} className="px-4 py-12 text-center"><Loader2 className="w-5 h-5 animate-spin text-indigo-400 mx-auto" /></td></tr>
-              : areas.length === 0 ? <tr><td colSpan={3} className="px-4 py-12 text-center text-slate-500 text-sm">{aid ? 'No areas' : 'Select a city'}</td></tr>
-              : areas.map(a => (
+              : filteredAreas.length === 0 ? <tr><td colSpan={3} className="px-4 py-12 text-center text-slate-500 text-sm">{aid ? 'No areas' : 'Select a city'}</td></tr>
+              : filteredAreas.map(a => (
                 <tr key={a.id} className="hover:bg-slate-700/30 transition-colors">
                   <td className="px-4 py-3 font-medium text-white whitespace-nowrap">{a.name}</td>
                   <td className="px-4 py-3"><Bdg a={a.is_active} /></td>
@@ -193,6 +260,7 @@ export function AdminLocations() {
               ))}
             </tbody>
           </table>
+          </div>
         </Pnl>
       </div>
 
@@ -201,7 +269,7 @@ export function AdminLocations() {
           <div className="bg-slate-800 rounded-2xl border border-slate-700 p-6 w-full max-w-md mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold text-white capitalize">{modal.m} {modal.t}</h3>
-              <button onClick={() => setModal(null)} className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-700"><X className="w-5 h-5" /></button>
+              <button type="button" onClick={() => setModal(null)} className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-700"><X className="w-5 h-5" /></button>
             </div>
             <div className="space-y-4">
               <input type="text" placeholder="Name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} className="w-full bg-slate-700 border border-slate-600 rounded-xl px-4 py-2.5 text-white text-sm placeholder-slate-400 focus:outline-none focus:border-indigo-500" />
@@ -212,12 +280,13 @@ export function AdminLocations() {
               </label>
             </div>
             <div className="flex gap-3 mt-6">
-              <button onClick={() => setModal(null)} className="flex-1 px-4 py-2.5 bg-slate-700 hover:bg-slate-600 text-white rounded-xl text-sm font-medium">Cancel</button>
-              <button onClick={save} className="flex-1 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-medium">Save</button>
+            <button type="button" onClick={() => setModal(null)} className="flex-1 px-4 py-2.5 bg-slate-700 hover:bg-slate-600 text-white rounded-xl text-sm font-medium">Cancel</button>
+            <button type="button" onClick={save} disabled={saving} className="flex-1 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-sm font-medium">{saving ? 'Saving...' : 'Save'}</button>
             </div>
           </div>
         </div>
       )}
+      {confirmDialog}
     </div>
   );
 }

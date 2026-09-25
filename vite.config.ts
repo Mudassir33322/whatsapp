@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
@@ -8,26 +9,51 @@ export default defineConfig(({mode}) => {
   return {
     plugins: [react(), tailwindcss()],
     define: {
-      'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+      // Only expose public-safe env vars; never leak API keys to client bundle
+      'process.env.GEMINI_API_KEY': JSON.stringify(''),
     },
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@/*': path.resolve(__dirname, './src'),
       },
     },
+    build: {
+      target: 'esnext',
+      cssCodeSplit: true,
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            vendor: ['react', 'react-dom', 'react-router-dom'],
+            ui: ['lucide-react', 'motion', 'recharts'],
+            utils: ['date-fns', 'zod'],
+          },
+          chunkFileNames: 'assets/js/[name]-[hash].js',
+          entryFileNames: 'assets/js/[name]-[hash].js',
+          assetFileNames: 'assets/[ext]/[name]-[hash].[ext]',
+        },
+      },
+      chunkSizeWarningLimit: 1000,
+      sourcemap: 'hidden',
+    },
+    test: {
+      globals: true,
+      environment: 'jsdom',
+      setupFiles: './src/test-setup.ts',
+      include: ['src/**/*.test.{ts,tsx}', 'src/**/*.spec.{ts,tsx}'],
+    },
     server: {
-      hmr: false, // Disable HMR to stop reload loops
+      hmr: { overlay: true },
       watch: {
-        ignored: ['**/*'], // Ignore all files for watching to prevent reloads
+        usePolling: false,
       },
       proxy: {
         '/api': {
-          target: 'http://localhost:3000',
+          target: 'http://localhost:3001',
           changeOrigin: true,
           secure: false,
         },
         '/socket.io': {
-          target: 'ws://localhost:3000',
+          target: 'http://localhost:3001',
           ws: true
         }
       }

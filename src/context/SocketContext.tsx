@@ -24,45 +24,61 @@ interface SocketContextType {
 
 const SocketContext = createContext<SocketContextType | null>(null);
 
+let globalSocket: Socket | null = null;
+let globalMountCount = 0;
+
 export function SocketProvider({ children, sessionId }: { children: React.ReactNode, sessionId?: string }) {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [status, setStatus] = useState<SessionStatus | null>(null);
   const statusRef = useRef<SessionStatus | null>(null);
+  const sessionIdRef = useRef(sessionId);
+  const joinedSidRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
 
   useEffect(() => {
     const url = API_URL || undefined;
-    const adminToken = localStorage.getItem('admin-token');
-    const s = io(url, {
-      auth: { token: adminToken },
-      reconnectionAttempts: 10,
-      reconnectionDelay: 2000,
-      reconnectionDelayMax: 30000,
-      randomizationFactor: 0.5,
-      timeout: 20000,
-      autoConnect: true,
-      transports: ['websocket', 'polling']
-    } as any);
 
+    if (globalSocket) {
+      globalSocket.auth = { token: localStorage.getItem('admin-token') || localStorage.getItem('salon-token') };
+      globalSocket.disconnect();
+      globalSocket.connect();
+    } else {
+      globalSocket = io(url, {
+        auth: { token: localStorage.getItem('admin-token') || localStorage.getItem('salon-token') },
+        reconnectionAttempts: Infinity,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 15000,
+        randomizationFactor: 0.5,
+        timeout: 20000,
+        autoConnect: true
+      });
+    }
+
+    const s = globalSocket;
     setSocket(s);
 
-    const handleConnect = () => {
-      console.log('Socket Context: Connected to server');
-      if (sessionId) {
-        s.emit('join-session', sessionId);
-      }
+    const emitJoinSession = () => {
+      const sid = sessionIdRef.current;
+      if (!sid || joinedSidRef.current === sid) return;
+      joinedSidRef.current = sid;
+      s.emit('join-session', sid);
     };
 
+    const handleConnect = emitJoinSession;
+
     const handleSessionStatus = (data: SessionStatus) => {
-      console.log('Socket Context: Session status updated', data);
       statusRef.current = data;
       setStatus(data);
     };
 
     const handleDisconnect = (reason: string) => {
-      console.log('Socket Context: Disconnected', reason);
-      if (sessionId) {
+      const sid = sessionIdRef.current;
+      if (sid) {
         const newStatus: SessionStatus = {
-          sessionId,
+          sessionId: sid,
           status: reason === 'io server disconnect' ? 'DISCONNECTED' : 'RECONNECTING',
           message: reason === 'io server disconnect' 
             ? 'Disconnected from server' 
@@ -73,21 +89,41 @@ export function SocketProvider({ children, sessionId }: { children: React.ReactN
       }
     };
 
+    const handleReconnect = emitJoinSession;
+
+    const handleConnectError = (err: Error) => {
+      console.error('Socket Context: Connection error', err.message);
+      setStatus({ sessionId: sessionIdRef.current || '', status: 'ERROR', message: `Connection error: ${err.message}` });
+    };
+
     s.on('connect', handleConnect);
     s.on('session-status', handleSessionStatus);
     s.on('disconnect', handleDisconnect);
-    s.io.on('reconnect', () => {
-      console.log('Socket Context: Reconnected, re-joining session');
-      if (sessionId) {
-        s.emit('join-session', sessionId);
-      }
-    });
+    s.on('reconnect', handleReconnect);
+    s.on('connect_error', handleConnectError);
+
+    if (s.connected && sessionIdRef.current) {
+      emitJoinSession();
+    }
+
+    globalMountCount++;
 
     return () => {
-      console.log('Socket Context: Cleaning up');
-      s.disconnect();
+      s.off('connect', handleConnect);
+      s.off('session-status', handleSessionStatus);
+      s.off('disconnect', handleDisconnect);
+      s.off('reconnect', handleReconnect);
+      s.off('connect_error', handleConnectError);
+
+      globalMountCount--;
+      setTimeout(() => {
+        if (globalMountCount === 0 && globalSocket) {
+          globalSocket.disconnect();
+          globalSocket = null;
+        }
+      }, 0);
     };
-  }, [sessionId]);
+  }, []);
 
   const initSession = useCallback((sid: string) => {
     if (socket) socket.emit('init-session', sid);
@@ -115,8 +151,18 @@ export function SocketProvider({ children, sessionId }: { children: React.ReactN
     if (socket) socket.emit('delete-session', sid);
   }, [socket]);
 
+  const value = React.useMemo(() => ({
+    socket,
+    status,
+    initSession,
+    restartSession,
+    sendMessage,
+    onMessage,
+    deleteSession
+  }), [socket, status, initSession, restartSession, sendMessage, onMessage, deleteSession]);
+
   return (
-    <SocketContext.Provider value={{ socket, status, initSession, restartSession, sendMessage, onMessage, deleteSession }}>
+    <SocketContext.Provider value={value}>
       {children}
     </SocketContext.Provider>
   );
